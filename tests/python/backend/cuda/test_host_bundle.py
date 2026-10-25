@@ -26,6 +26,21 @@ from tvm_tirx.script import tirx as T
 from tvm_tirx.testing import env
 
 
+def test_cuda_host_has_one_ffi_only_prelude():
+    import tvm_ffi
+
+    from tvm_tirx import ir, tirx
+
+    function = tirx.Function([], ir.Return(ir.const(0)), ret_type=ir.PrimType("int32"))
+    function = function.with_attr("global_symbol", "call")
+    source = tvm_ffi.get_global_func("target.build.cuda_host")(
+        ir.IRModule({"call": function}), tvm_tirx.target.Target("cuda_host")
+    ).inspect_source()
+    assert source.count("void* __tvm_ffi__library_ctx =") == 1
+    assert "tvm/runtime/" not in source
+    assert source.index("#include <tvm/ffi/c_api.h>") < source.index("int32_t call(")
+
+
 @pytest.fixture(params=["nvcc", "nvrtc"])
 def backend_config(request):
     if request.param == "nvrtc":

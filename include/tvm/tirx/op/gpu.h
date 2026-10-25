@@ -76,6 +76,7 @@ TVM_TIRX_DLL const Op& gpu_thread_invariant_op();
  *
  * Arguments, in order:
  * - args[0]: storage_scope, The storage scope.
+ * - args[1:]: Optional warp mask, or named barrier identifier and thread count.
  */
 TVM_TIRX_DLL const Op& gpu_storage_sync_op();
 

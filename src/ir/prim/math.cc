@@ -242,7 +242,9 @@ const Op& assume_op() {
 
 PrimExpr infinity(PrimType value_ty, Location loc) {
   PrimType dtype = value_ty;
-  TVM_FFI_ICHECK_EQ(dtype.lanes(), 1);
+  if (dtype.lanes() != 1) {
+    return Broadcast(infinity(dtype.WithLanes(1), loc), dtype.lanes(), loc);
+  }
   if (dtype.MatchesCode(DLDataTypeCode::kDLFloat)) {
     if (dtype.bits() == 64) {
       return FloatImm(value_ty, std::numeric_limits<double>::infinity(), loc);
@@ -315,14 +317,20 @@ PrimExpr isinf(PrimExpr x, Location loc) {
     return MakeConst(t, false, loc);
   } else if (x.ty().MatchesCode(DLDataTypeCode::kDLFloat)) {
     PrimExpr infX = infinity(x.ty(), loc);
-    return abs(x, loc) == infX && !isnan(x, loc);
+    return x == infX || x == -infX;
   } else {
     TVM_FFI_THROW(InternalError) << "Data type " << x.ty()
                                  << " not supported for finiteness ops. Skipping it...";
   }
 }
 
-PrimExpr isfinite(PrimExpr x, Location loc) { return !isinf(x, loc) && !isnan(x, loc); }
+PrimExpr isfinite(PrimExpr x, Location loc) {
+  if (x.ty().MatchesCode(kDLInt, kDLUInt, kDLBool)) {
+    return MakeConst(PrimType::Bool(x.ty().lanes()), true, loc);
+  }
+  return Call(std::nullopt, Op::Get("prim.isfinite"), {std::move(x)}, {}, {}, loc)
+      .as_or_throw<PrimExpr>();
+}
 
 PrimExpr fmod(PrimExpr x, PrimExpr y, Location loc) {
   BinaryOpMatchTypes(x, y, loc);
@@ -582,6 +590,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .signature(sig::arg<PrimExpr>("x", "The input value."))
       .set_native_fn_attr<&InferTypeIsNaN>(tvm::op_attr::kInferType)
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure);
+
+  OpDef("prim.isfinite")
+      .signature(sig::arg<PrimExpr>("x", "The input value."))
+      .set_native_fn_attr<&InferTypeIsNaN>(tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure)
+      .set_attr(tvm::tirx::op_attr::kVectorizable, true);
 
   OpDef("prim.popcount")
       .set_native_fn_attr<&InferTypeReturnArgType<0>>(tvm::op_attr::kInferType)

@@ -173,6 +173,15 @@ static PrimExpr DispatchCUDAShuffle(const PrimExpr& e) {
 }
 
 void RegisterCudaIntrinRules() {
+  OpDef("prim.isfinite")
+      .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", [](const PrimExpr& expression) {
+        PrimExpr value = expression.as_or_throw<Call>()->args[0].as_or_throw<PrimExpr>();
+        if (!value.ty().MatchesCode(kDLFloat) || value.ty().bits() < 32) {
+          value = prim::cast(value, PrimType::Float(32).WithLanes(value.ty().lanes()));
+        }
+        return Call(expression.ty(), tirx::call_pure_extern_op(), {StringImm("isfinite"), value})
+            .as_or_throw<PrimExpr>();
+      });
   // clang-format off
   OpDef("prim.clz")
       .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",

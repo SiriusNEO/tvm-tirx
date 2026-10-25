@@ -16,6 +16,7 @@
 # under the License.
 """Test type nodes in the IR"""
 
+import json
 import uuid
 
 import pytest
@@ -49,6 +50,74 @@ def test_prim_type():
     assert x.dtype == "int32"
     with pytest.raises(TypeError, match="PtrType::VoidPtrType"):
         tvm_tirx.ir.PrimType("handle")
+
+
+@pytest.mark.parametrize(
+    "encoding",
+    [
+        (0, 32, 1),
+        (2, 16, 8),
+        (4, 16, 16),
+        (17, 4, 1),
+        (17, 8, 1),
+        (17, 8, 16),
+        (2, 32, -4),
+        (3, 0, 0),
+    ],
+)
+def test_prim_type_json_preserves_dtype_encoding(encoding):
+    primitive = tvm_tirx.ir.PrimType(tvm_ffi.dtype.from_dlpack_data_type(encoding))
+    restored = tvm_tirx.ir.load_json(tvm_tirx.ir.save_json(primitive))
+    assert restored.same_as(primitive)
+    assert restored.dtype.type_code == encoding[0]
+    assert restored.dtype.bits == encoding[1]
+    assert restored.dtype.lanes == primitive.dtype.lanes
+    check_json_roundtrip(tvm_tirx.ir.FuncType([primitive], primitive))
+    if encoding[2] == 1:
+        tensor_type = tvm_tirx.tirx.TensorType([16], primitive)
+        check_json_roundtrip(tensor_type)
+        parameter = tvm_tirx.ir.Var("source", tensor_type)
+        check_json_roundtrip(tvm_tirx.tirx.Function([parameter], tvm_tirx.ir.Evaluate(0)))
+
+
+@pytest.mark.parametrize("dtype", ["int32", "float32x4", "float4_e2m1fn"])
+def test_prim_type_json_loads_legacy_dtype_strings(dtype):
+    graph = json.loads(tvm_tirx.ir.save_json(tvm_tirx.ir.PrimType(dtype)))
+    graph["nodes"][graph["root_index"]]["data"] = {"dtype": dtype}
+    assert tvm_tirx.ir.load_json(json.dumps(graph)).same_as(tvm_tirx.ir.PrimType(dtype))
+
+
+@pytest.mark.parametrize(
+    "encoding",
+    [[2, 32], [-1, 32, 1], [256, 32, 1], [2, -1, 1], [2, 256, 1], [2, 32, -1], [2, 32, 65536]],
+)
+def test_prim_type_json_rejects_out_of_range_encoding(encoding):
+    graph = json.loads(tvm_tirx.ir.save_json(tvm_tirx.ir.PrimType("float32")))
+    graph["nodes"][graph["root_index"]]["data"] = encoding
+    with pytest.raises(ValueError, match="PrimType"):
+        tvm_tirx.ir.load_json(json.dumps(graph))
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_fp4_script_preserves_storage_width(bits):
+    primitive = tvm_tirx.ir.PrimType.from_dlpack_data_type((17, bits, 1))
+    namespaces = {"I": tvm_tirx.script.ir, "T": tvm_tirx.script.tirx}
+    for original in (primitive, tvm_tirx.ir.DataTypeImm(primitive.dtype)):
+        restored = eval(original.script(), namespaces)
+        tvm_tirx.ir.assert_structural_equal(original, restored)
+    tensor_type = tvm_tirx.tirx.TensorType([16], primitive)
+    parameter = tvm_tirx.ir.Var("output", tensor_type)
+    source = tvm_tirx.ir.Var("source", tensor_type)
+    store = tvm_tirx.ir.TensorStore(parameter, [0], tvm_tirx.ir.TensorLoad(source, [0]))
+    original = tvm_tirx.tirx.Function([source, parameter], store).with_attr("global_symbol", "main")
+    restored = tvm_tirx.script.from_source(original.script(), extra_vars=namespaces)
+    tvm_tirx.ir.assert_structural_equal(original, restored)
+
+
+def test_fp4_storage_widths_have_distinct_script_cache_keys():
+    packed = tvm_tirx.ir.PrimType.from_dlpack_data_type((17, 4, 1))
+    unpacked = tvm_tirx.ir.PrimType.from_dlpack_data_type((17, 8, 1))
+    assert packed.script() != unpacked.script()
 
 
 def test_func_type():

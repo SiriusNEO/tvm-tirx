@@ -30,6 +30,13 @@
 
 namespace tvm {
 
+ArgumentInfo::ArgumentInfo(ffi::String name, ffi::String doc) {
+  auto node = ffi::make_object<ArgumentInfoObj>();
+  node->name = std::move(name);
+  node->doc = std::move(doc);
+  data_ = std::move(node);
+}
+
 // Owns canonical Ops and mutable attribute columns for the lifetime of the process.
 class OpRegistry {
  public:
@@ -120,18 +127,12 @@ OpDef::OpDef(const ffi::String& name) : op_(OpRegistry::Global()->GetOrCreate(na
 OpDef::OpDef(const ffi::String& name, const ffi::String& doc) : OpDef(name) { get()->doc = doc; }
 
 OpDef& OpDef::add_arg(const ffi::String& name, const ffi::String& doc) {
-  auto node = ffi::make_object<ArgumentInfoObj>();
-  node->name = name;
-  node->doc = doc;
-  get()->args_info.push_back(ArgumentInfo(ffi::UnsafeInit{}, std::move(node)));
+  get()->args_info.push_back(ArgumentInfo(name, doc));
   return *this;
 }
 
 OpDef& OpDef::add_ty_arg(const ffi::String& name, const ffi::String& doc) {
-  auto node = ffi::make_object<ArgumentInfoObj>();
-  node->name = name;
-  node->doc = doc;
-  get()->ty_args_info.push_back(ArgumentInfo(ffi::UnsafeInit{}, std::move(node)));
+  get()->ty_args_info.push_back(ArgumentInfo(name, doc));
   return *this;
 }
 

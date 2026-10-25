@@ -216,6 +216,15 @@ TVM_TIRX_DLL const Op& call_cpacked_op();
 TVM_TIRX_DLL const Op& call_packed_lowered_op();
 
 /*!
+ * \brief Invoke a packed function with an explicit result slot, returning its status code.
+ *
+ * Arguments are the function name, argument stack, argument count, and result pointer.
+ * The result slot must contain a valid TVMFFIAny. The caller owns any returned object
+ * and is responsible for propagating errors and releasing owned values.
+ */
+TVM_TIRX_DLL const Op& call_packed_with_result_op();
+
+/*!
  * \brief Invoke a C packed function using an explicit argument stack.
  *
  * Arguments, in order:

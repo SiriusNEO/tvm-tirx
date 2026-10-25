@@ -563,7 +563,6 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> GlobalVarMaybeInplaceMu
 
 TVM_FFI_INLINE ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> CallVisit(
     ffi::StructuralVisitorObj* visitor, ffi::AnyView value) noexcept {
-  // skips: attrs, constant metadata left untouched like the classic Expr functors.
   const CallNode* self =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const CallNode>(value);
   // A PrimType carries only a dtype, so it has nothing to visit.  Broad callbacks do not see this
@@ -577,6 +576,9 @@ TVM_FFI_INLINE ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> CallVisit(
     TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->op));
   }
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->args));
+  if (CallAttrsMayContainExpr(self)) {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->attrs));
+  }
   // An empty ty_args has no element to traverse.  Broad callbacks do not see the empty container;
   // nonempty type arguments retain normal container descent and callback behavior.
   if (!self->ty_args.empty()) {
@@ -587,7 +589,6 @@ TVM_FFI_INLINE ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> CallVisit(
 
 TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> CallMutate(
     ffi::StructuralMutatorObj* mutator, ffi::AnyView value) noexcept {
-  // skips: attrs, constant metadata left untouched like the classic Expr functors.
   const CallNode* self =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const CallNode>(value);
   // A PrimType carries only a dtype, so it has nothing to substitute.  Broad callbacks do not see
@@ -608,6 +609,12 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> CallMutate(
   }
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Expr>>, mapped_args_u,
                                     mutator->MutateExpected(self->args));
+  ffi::UnchangedOr<ffi::Optional<Attrs>> mapped_attrs_u = ffi::Unchanged();
+  if (CallAttrsMayContainExpr(self)) {
+    TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Optional<Attrs>>, descended_attrs_u,
+                                      mutator->MutateExpected(self->attrs));
+    mapped_attrs_u = std::move(descended_attrs_u);
+  }
   // An empty ty_args has no element to substitute.  Broad callbacks do not see the empty
   // container; nonempty type arguments retain normal container descent and callback behavior.
   ffi::UnchangedOr<ffi::Array<Type>> mapped_ty_args_u = ffi::Unchanged();
@@ -618,6 +625,7 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> CallMutate(
   }
   if (mapped_ty_u.UnchangedOrSameAs(self->ty) && mapped_op_u.UnchangedOrSameAs(self->op) &&
       mapped_args_u.UnchangedOrSameAs(self->args) &&
+      mapped_attrs_u.UnchangedOrSameAs(self->attrs) &&
       mapped_ty_args_u.UnchangedOrSameAs(self->ty_args)) {
     return ffi::Unchanged();
   }
@@ -625,13 +633,13 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> CallMutate(
   if (!mapped_ty_u.IsUnchanged()) copy->ty = std::move(mapped_ty_u).ValueUnchecked();
   if (!mapped_op_u.IsUnchanged()) copy->op = std::move(mapped_op_u).ValueUnchecked();
   if (!mapped_args_u.IsUnchanged()) copy->args = std::move(mapped_args_u).ValueUnchecked();
+  if (!mapped_attrs_u.IsUnchanged()) copy->attrs = std::move(mapped_attrs_u).ValueUnchecked();
   if (!mapped_ty_args_u.IsUnchanged()) copy->ty_args = std::move(mapped_ty_args_u).ValueUnchecked();
   return ffi::Any(std::move(copy));
 }
 
 TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> CallMaybeInplaceMutate(
     ffi::StructuralMutatorObj* mutator, ffi::AnyView value) noexcept {
-  // skips: attrs, constant metadata left untouched like the classic Expr functors.
   CallNode* self = const_cast<CallNode*>(
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const CallNode>(value));
   // A PrimType carries only a dtype, so it has nothing to substitute.  Broad callbacks do not see
@@ -652,6 +660,13 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> CallMaybeInplaceMutate(
   }
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Expr>>, mapped_args_u,
                                     mutator->MutateExpected(self->args, ffi::InplaceMode::kAllow));
+  ffi::UnchangedOr<ffi::Optional<Attrs>> mapped_attrs_u = ffi::Unchanged();
+  if (CallAttrsMayContainExpr(self)) {
+    TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(
+        ffi::UnchangedOr<ffi::Optional<Attrs>>, descended_attrs_u,
+        mutator->MutateExpected(self->attrs, ffi::InplaceMode::kAllow));
+    mapped_attrs_u = std::move(descended_attrs_u);
+  }
   // An empty ty_args has no element to substitute.  Broad callbacks do not see the empty
   // container; nonempty type arguments retain normal container descent and callback behavior.
   ffi::UnchangedOr<ffi::Array<Type>> mapped_ty_args_u = ffi::Unchanged();
@@ -663,12 +678,14 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> CallMaybeInplaceMutate(
   }
   if (mapped_ty_u.UnchangedOrSameAs(self->ty) && mapped_op_u.UnchangedOrSameAs(self->op) &&
       mapped_args_u.UnchangedOrSameAs(self->args) &&
+      mapped_attrs_u.UnchangedOrSameAs(self->attrs) &&
       mapped_ty_args_u.UnchangedOrSameAs(self->ty_args)) {
     return ffi::Unchanged();
   }
   if (!mapped_ty_u.IsUnchanged()) self->ty = std::move(mapped_ty_u).ValueUnchecked();
   if (!mapped_op_u.IsUnchanged()) self->op = std::move(mapped_op_u).ValueUnchecked();
   if (!mapped_args_u.IsUnchanged()) self->args = std::move(mapped_args_u).ValueUnchecked();
+  if (!mapped_attrs_u.IsUnchanged()) self->attrs = std::move(mapped_attrs_u).ValueUnchecked();
   if (!mapped_ty_args_u.IsUnchanged()) self->ty_args = std::move(mapped_ty_args_u).ValueUnchecked();
   return ffi::Unchanged();
 }

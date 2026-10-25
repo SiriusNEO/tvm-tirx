@@ -223,10 +223,22 @@ class HostDeviceSplitter : public StmtExprMutator {
                      {data_param.value()}, {}, {kernel_tensor.as_or_throw<TensorVar>().ty()})),
            std::move(body)});
     }
-    Function device_func(kernel_params, SeqStmt(body), kernel_ret_type);
+    Function device_func(kernel_params, SeqStmt(body), kernel_ret_type, DictAttrs(),
+                         cur_func_->loc);
     device_func = WithAttrs(std::move(device_func), {{tvm::attr::kTarget.name, device_target},
                                                      {tvm::tirx::attr::kNoAlias.name, true},
                                                      {tvm::tirx::attr::kIsGlobalFunc.name, true}});
+    if (auto attributes = region->attrs.GetAttr<DictAttrs>("function_attrs")) {
+      TVM_FFI_CHECK(UndefinedVars(attributes.value()).empty(), ValueError)
+          << "Outlined function attributes must not capture local variables";
+      for (const auto& [key, value] : attributes.value()->dict) {
+        TVM_FFI_CHECK(key != tvm::attr::kTarget.name && key != tvm::attr::kCallingConv.name &&
+                          key != tvm::attr::kGlobalSymbol.name,
+                      ValueError)
+            << "Device scope cannot override outlined function attribute " << key;
+        device_func = WithAttr(std::move(device_func), key, value);
+      }
+    }
     if (auto config = region->attrs->dict.Get("backend_config")) {
       device_func = WithAttr(std::move(device_func), "backend_config", config.value());
     } else if (auto config = cur_func_->GetAttr<ffi::String>("backend_config")) {
@@ -467,11 +479,13 @@ class DeviceInfoCollector : public StmtExprVisitor {
       DLDataType dtype = call->ty_args[0].as_or_throw<TensorType>()->dtype->dtype;
       PrimType element_type(dtype);
       TVM_FFI_ICHECK_GT(shape->fields.size(), 0);
-      PrimExpr dyn_size = IntImm::Int32(1);
+      PrimExpr dyn_size = IntImm::Int64(1);
       for (const auto& extent : shape->fields) {
         dyn_size *= extent.as_or_throw<PrimExpr>();
       }
-      dyn_size *= IntImm::Int64(static_cast<int64_t>(element_type.StorageBytes()));
+      int64_t element_bits = element_type.bits() * element_type.lanes();
+      dyn_size = prim::FloorDiv(dyn_size * IntImm::Int64(element_bits) + IntImm::Int64(7),
+                                IntImm::Int64(8));
       if (bind_map_.size()) {
         auto f_substitute = [this](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
           if (auto repl = bind_map_.Get(var)) return ffi::Any(*std::move(repl));
@@ -502,27 +516,25 @@ class DeviceInfoCollector : public StmtExprVisitor {
   ffi::Map<Var, PrimExpr> bind_map_;
 };
 
-class ReturnRemover : public StmtExprMutator {
+class KernelReturnNormalizer : public StmtExprMutator {
  public:
   using StmtExprMutator::Mutate;
   using StmtExprMutator::Mutate_;
-  static Stmt Apply(const Stmt& stmt, bool remove) {
-    auto mutator = ffi::make_object<ReturnRemover>(remove);
+  static Stmt Apply(const Stmt& stmt) {
+    auto mutator = ffi::make_object<KernelReturnNormalizer>();
     return mutator->Mutate(stmt, InplaceMode::kAllow).ValueOrUnchanged(stmt);
   }
 
- public:
-  explicit ReturnRemover(bool remove) : remove_(remove) {}
-
  private:
   UnchangedOr<Stmt> Mutate_(const ReturnNode* op, InplaceMode inplace_mode) override {
+    if (const auto* value = op->value.as<TupleNode>(); value && value->fields.empty()) {
+      return ffi::Unchanged();
+    }
     auto as_int = op->value.as<IntImmNode>();
     TVM_FFI_ICHECK(as_int && as_int->value == 0)
-        << "Device kernel may only contain a successful return, return 0";
-    return remove_ ? Evaluate(0) : ffi::GetRef<Stmt>(op);
+        << "Device kernel may only contain a successful return, return () or return 0";
+    return Return(tvm::Tuple(ffi::Array<Expr>{}), op->loc);
   }
-
-  bool remove_;
 };
 
 class GlobalVarCallCollector : public StmtExprVisitor {
@@ -689,9 +701,7 @@ class DeviceKernelMutator : public StmtExprMutator {
       {
         auto write_ptr = func.CopyOnWrite();
         write_ptr->ret_type = VoidType();
-        Target target = func->GetAttr(tvm::attr::kTarget).value();
-        bool preserve_early_returns = target->kind->name == "cuda";
-        write_ptr->body = ReturnRemover::Apply(write_ptr->body.value(), !preserve_early_returns);
+        write_ptr->body = KernelReturnNormalizer::Apply(write_ptr->body.value());
       }
 
       func = WithAttrs(std::move(func),
@@ -776,7 +786,7 @@ class DeviceKernelMutator : public StmtExprMutator {
         // launch, but need to be replaced with call_extern.
         extern_function_call_.insert(gvar);
         ffi::Array<Expr> args;
-        args.push_back(StringImm(gvar->name_hint));
+        args.push_back(StringImm(dev_info.global_symbol));
         for (const Expr& arg : node->args) {
           args.push_back(arg);
         }
@@ -898,7 +908,7 @@ IRModule LowerDeviceKernelLaunches(IRModule mod) {
 
 namespace transform {
 
-Pass SplitHostDevice() {
+Pass OutlineDeviceRegions() {
   auto pass_func = [](IRModule mod, PassContext ctx) {
     UniqueNameSupply global_names(mod->functions.begin(), mod->functions.end(),
                                   [](const auto& kv) { return kv.first->name_hint; });
@@ -927,16 +937,29 @@ Pass SplitHostDevice() {
 
     mod->Update(updates);
     mod->Update(device_mod);
-    mod = ConvertSSA()(mod);
-    return LowerDeviceKernelLaunches(mod);
+    return ConvertSSA()(mod);
   };
 
-  return tvm::transform::CreateModulePass(pass_func, 0, "tirx.SplitHostDevice");
+  return tvm::transform::CreateModulePass(pass_func, 0, "tirx.OutlineDeviceRegions");
+}
+
+Pass LowerDeviceKernelLaunch() {
+  auto pass_func = [](IRModule mod, PassContext) {
+    return LowerDeviceKernelLaunches(std::move(mod));
+  };
+  return tvm::transform::CreateModulePass(pass_func, 0, "tirx.LowerDeviceKernelLaunch");
+}
+
+Pass SplitHostDevice() {
+  return Sequential({OutlineDeviceRegions(), LowerDeviceKernelLaunch()}, "tirx.SplitHostDevice");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tirx.transform.SplitHostDevice", SplitHostDevice);
+  refl::GlobalDef()
+      .def("tirx.transform.SplitHostDevice", SplitHostDevice)
+      .def("tirx.transform.OutlineDeviceRegions", OutlineDeviceRegions)
+      .def("tirx.transform.LowerDeviceKernelLaunch", LowerDeviceKernelLaunch);
 }
 
 }  // namespace transform

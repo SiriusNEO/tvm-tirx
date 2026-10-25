@@ -25,8 +25,12 @@
 #define TVM_TIRX_TRANSFORM_FLATTEN_TENSOR_UTILS_H_
 
 #include <tvm/ir/prim/op.h>
+#include <tvm/sym/int_set.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/layout.h>
+
+#include <cstdint>
+#include <limits>
 
 namespace tvm {
 namespace tirx {
@@ -111,6 +115,56 @@ TVM_FFI_INLINE TensorVar FlattenedTensor(const TensorVar& tensor,
                    TensorType(output_shape, tensor.dtype(), tensor.scope(),
                               tensor.ty()->data_alignment, std::nullopt),
                    tensor->loc);
+}
+
+template <typename IndexMapper>
+ffi::Array<Range> MapTensorRegionBounds(const ffi::Array<Range>& regions,
+                                        const sym::Analyzer& analyzer, IndexMapper map_indices) {
+  ffi::Array<PrimExpr> indices;
+  ffi::Map<Var, sym::IntSet> domains;
+  bool empty = false;
+  for (const Range& region : regions) {
+    PrimVar index("region_index", region->begin.ty());
+    indices.push_back(index);
+    domains.Set(index, sym::IntSet::FromRange(region));
+    empty |= analyzer->CanProve(region->extent <= 0);
+  }
+  ffi::Array<Range> mapped;
+  if (empty) {
+    ffi::Array<PrimExpr> begins;
+    for (const Range& region : regions) begins.push_back(region->begin);
+    for (const PrimExpr& begin : map_indices(begins)) {
+      mapped.push_back(Range::FromMinExtent(begin, prim::MakeConst(begin.ty(), 0)));
+    }
+  } else {
+    for (size_t axis = 0; axis < indices.size(); ++axis) {
+      analyzer->Bind(indices[axis].as_or_throw<Var>(), regions[axis]);
+    }
+    for (const PrimExpr& index : map_indices(indices)) {
+      auto covered = sym::EvalSet(index, domains).CoverRange(std::nullopt);
+      if (!covered.has_value()) {
+        auto bounds = analyzer->const_int_bound(index);
+        int64_t minimum = bounds->min_value;
+        int64_t maximum = bounds->max_value;
+        TVM_FFI_CHECK(minimum != sym::ConstIntBound::kNegInf &&
+                          maximum != sym::ConstIntBound::kPosInf && minimum <= maximum,
+                      ValueError)
+            << "Cannot flatten a tensor region with an unbounded physical address range: "
+            << regions;
+        uint64_t extent = static_cast<uint64_t>(maximum) - static_cast<uint64_t>(minimum) + 1;
+        TVM_FFI_CHECK_LE(extent, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                         ValueError)
+            << "Flattened tensor region extent does not fit int64: " << regions;
+        covered = Range::FromMinExtent(IntImm(PrimType::Int(64), minimum),
+                                       IntImm(PrimType::Int(64), static_cast<int64_t>(extent)));
+      }
+      TVM_FFI_CHECK(covered.has_value(), ValueError)
+          << "Cannot flatten a tensor region with an unbounded physical address range: " << regions;
+      mapped.push_back(Range::FromMinExtent(analyzer->Simplify(covered.value()->begin),
+                                            analyzer->Simplify(covered.value()->extent)));
+    }
+  }
+  return mapped;
 }
 
 }  // namespace tirx

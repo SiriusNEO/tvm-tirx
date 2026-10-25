@@ -255,7 +255,10 @@ IRModule BindTarget(IRModule mod, const Target& target) {
       auto func_target_host = func_target.value()->GetHost();
       auto target_host = target->GetHost();
 
-      if (target_host && !func_target_host && is_externally_exposed) {
+      bool already_lowered =
+          function->GetAttr(tvm::attr::kCallingConv).value_or(CallingConv::kDefault) !=
+          CallingConv::kDefault;
+      if (target_host && !func_target_host && is_externally_exposed && !already_lowered) {
         auto new_target = Target::WithHost(func_target.value(), target_host.value());
         new_mod->Update(gvar, WithAttr(std::move(function), tvm::attr::kTarget.name, new_target));
       }

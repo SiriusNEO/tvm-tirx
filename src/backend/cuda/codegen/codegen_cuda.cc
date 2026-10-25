@@ -37,6 +37,7 @@
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <string>
@@ -73,6 +74,16 @@ TVM_FFI_INLINE bool IsPackedFloat(const PrimType& ty) {
   return IsFloat8(ty) || IsFloat6(ty) || IsFloat4(ty);
 }
 
+bool IsWideInteger(const PrimType& type) {
+  return type.MatchesCode(kDLInt, kDLUInt) &&
+         ((type.bits() == 8 && type.lanes() > 32) || (type.bits() == 16 && type.lanes() > 8) ||
+          (type.bits() == 32 && type.lanes() > 8) || (type.bits() == 64 && type.lanes() > 4));
+}
+
+bool IsPackedInteger(const PrimType& type) {
+  return type.MatchesCode(kDLInt, kDLUInt) && type.bits() == 4 && !type.IsScalar();
+}
+
 }  // namespace
 
 std::string GetFP8Type(const PrimType& type_ty) {
@@ -95,7 +106,7 @@ std::string GetFP8Type(const PrimType& type_ty) {
   }
   stream << "__nv_fp8";
   std::string suffix;
-  if (type_ty.MatchesCode(DLDataTypeCode::kDLFloat8_e4m3fn)) {
+  if (type_ty.MatchesCode(DLDataTypeCode::kDLFloat8_e4m3fn, DLDataTypeCode::kDLFloat8_e4m3)) {
     suffix = "_e4m3";
   } else if (type_ty.MatchesCode(DLDataTypeCode::kDLFloat8_e5m2)) {
     suffix = "_e5m2";
@@ -196,7 +207,9 @@ class ThreadIdxExtractor : public tirx::StmtExprVisitor {
 
  private:
   ffi::Optional<VisitInterrupt> Visit_(const RegionStmtNode* op) final {
-    if (op->op.same_as(tirx::launch_thread_op())) {
+    if (op->op.same_as(tirx::scope_op())) {
+      return StmtExprVisitor::Visit_(op);
+    } else if (op->op.same_as(tirx::launch_thread_op())) {
       TVM_FFI_CHECK(!op->args[0].as_or_throw<StringImm>()->value.starts_with("vthread"), ValueError)
           << "Virtual thread launches must be lowered before code generation";
       ffi::String tag = op->args[0].as_or_throw<StringImm>()->value;
@@ -289,6 +302,11 @@ void CodeGenCUDA::DeclareFunction(const GlobalVar& gvar, const Function& func) {
 
 void CodeGenCUDA::AddFunction(const GlobalVar& gvar, const Function& func) {
   DeclareFunction(gvar, func);
+  if (auto source = func->GetAttr(tvm::codegen::attr::kSource)) {
+    EmitLocation(func->loc);
+    stream << *source << "\n\n";
+    return;
+  }
   if (!func->body.has_value()) return;
   InitFuncState(func);
   std::ostringstream parameters;
@@ -313,6 +331,7 @@ void CodeGenCUDA::AddFunction(const GlobalVar& gvar, const Function& func) {
   PrintExtraAttrs(func, signature);
   signature << " " << GetFunctionName(gvar) << parameters.str();
   fwd_decl_stream << signature.str() << ";\n";
+  EmitLocation(func->loc);
   stream << signature.str() << body;
 }
 
@@ -362,10 +381,32 @@ void CodeGenCUDA::Dispatch_(const ReturnNode* op) {
     return;
   }
   const auto* value = op->value.as<IntImmNode>();
-  TVM_FFI_ICHECK(value && value->value == 0)
-      << "CUDA device kernel may only contain a successful early return, return 0";
+  const auto* unit = op->value.as<TupleNode>();
+  TVM_FFI_ICHECK((value && value->value == 0) || (unit && unit->fields.empty()))
+      << "CUDA device kernel may only contain a successful early return, return () or return 0";
   PrintIndent();
   stream << "return;\n";
+}
+
+void CodeGenCUDA::Dispatch_(const AssertStmtNode* op) {
+  std::string condition = PrintExpr(op->condition);
+  PrintIndent();
+  stream << "if (!(" << condition << ")) {\n";
+  int scope = BeginScope();
+  std::string message = op->error_kind->value;
+  for (const auto& part : op->message_parts) {
+    message += " ";
+    message += part->value;
+  }
+  PrintIndent();
+  stream << "printf(\"%s\\n\", ";
+  PrintEscapedCString(message, stream);
+  stream << ");\n";
+  PrintIndent();
+  stream << "asm volatile(\"trap;\");\n";
+  EndScope(scope);
+  PrintIndent();
+  stream << "}\n";
 }
 
 std::string CodeGenCUDA::Finish() {
@@ -376,7 +417,7 @@ std::string CodeGenCUDA::Finish() {
   ffi::Array<ffi::String> tags;
   for (const auto& tag : codegen_tags_) tags.push_back(ffi::String(tag));
   std::string header = header_generator.value()(tags).cast<ffi::String>().operator std::string();
-  decl_stream << header;
+  header_stream_ << header;
 
   // Generate util functions
   for (const auto& [name, code] : util_funcs_) {
@@ -395,12 +436,13 @@ void CodeGenCUDA::Dispatch_(const ForNode* op) {
   std::string begin_str = PrintExpr(op->begin);
   std::string end_str = PrintExpr(op->end);
   std::string step_str = op->HasTrivialStep() ? "" : PrintExpr(op->step);
+  const auto* constant_step = op->step.as<IntImmNode>();
+  if (constant_step) {
+    TVM_FFI_CHECK(constant_step->value != 0, ValueError) << "For loop step must be nonzero";
+  }
   if (op->annotations.count(tvm::tirx::attr::kDisableUnroll.name)) {
     PrintIndent();
     stream << "#pragma unroll 1\n";
-  } else if (op->kind == ForKind::kUnrolled) {
-    PrintIndent();
-    stream << "#pragma unroll\n";
   } else if (auto it = op->annotations.find(tvm::tirx::attr::kPragmaUnroll);
              it != op->annotations.end()) {
     PrintIndent();
@@ -411,12 +453,22 @@ void CodeGenCUDA::Dispatch_(const ForNode* op) {
       stream << " " << count->value;
     }
     stream << "\n";
+  } else if (op->kind == ForKind::kUnrolled) {
+    PrintIndent();
+    stream << "#pragma unroll\n";
   }
   PrintIndent();
   std::string vid = AllocVarID(op->var.get());
   stream << "for (";
   PrintType(op->var.ty(), stream);
-  stream << ' ' << vid << " = " << begin_str << "; " << vid << " < " << end_str << "; ";
+  stream << ' ' << vid << " = " << begin_str << "; ";
+  if (constant_step) {
+    stream << vid << (constant_step->value < 0 ? " > " : " < ") << end_str;
+  } else {
+    stream << "((" << step_str << ") > 0 && " << vid << " < " << end_str << ") || ((" << step_str
+           << ") < 0 && " << vid << " > " << end_str << ")";
+  }
+  stream << "; ";
   if (step_str.empty()) {
     stream << "++" << vid;
   } else {
@@ -473,8 +525,51 @@ void CodeGenCUDA::BindThreadIndex(const PrimVar& var, const ffi::String& thread_
 
 void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
   int lanes = t.lanes();
+  if (IsWideInteger(t) || (IsPackedInteger(t) && lanes > 32)) {
+    std::string name = std::string("tvm_") + (t.MatchesCode(kDLUInt) ? "uint" : "int") +
+                       std::to_string(t.bits()) + "x" + std::to_string(lanes);
+    std::ostringstream element;
+    if (IsPackedInteger(t)) {
+      element << "unsigned char";
+    } else {
+      PrintType(t.WithLanes(1), element);
+    }
+    int count = IsPackedInteger(t) ? (lanes + 1) / 2 : lanes;
+    AddUtilFunction(name, "struct " + name + " { " + element.str() + " data[" +
+                              std::to_string(count) + "]; };\n");
+    os << name;
+    return;
+  }
   if (t.IsVoid()) {
     os << "void";
+    return;
+  }
+  if (IsCustomDType(t)) {
+    CustomDTypeStorage(t);
+    auto lookup = ffi::Function::GetGlobalRequired("tirx.intrinsics.cuda.get_dtype_codegen");
+    auto representation = lookup(t.WithLanes(1)->dtype).cast<ffi::Array<ffi::String>>();
+    TVM_FFI_CHECK(representation.size() == 2, ValueError)
+        << "CUDA custom dtype codegen must provide a scalar type and its definitions";
+    std::string scalar = representation[0];
+    std::string name = "tvm_custom" + std::to_string(static_cast<int>(t.code()));
+    std::string source = std::string(representation[1]) + "\n";
+    source += "static_assert(sizeof(" + scalar +
+              ") == " + std::to_string(t.WithLanes(1).StorageBytes()) + ");\n";
+    if (t.IsScalar()) {
+      AddUtilFunction(name, source);
+      os << scalar;
+    } else {
+      name += "x" + std::to_string(lanes);
+      source += "struct " + name + " { " + scalar + " data[" + std::to_string(lanes) + "]; };\n";
+      AddUtilFunction(name, source);
+      os << name;
+    }
+    return;
+  }
+  if (t.MatchesElementType(kDLFloat, 32) && lanes > 8) {
+    std::string name = "tvm_float32x" + std::to_string(lanes);
+    AddUtilFunction(name, "struct " + name + " { float data[" + std::to_string(lanes) + "]; };\n");
+    os << name;
     return;
   }
 
@@ -492,6 +587,8 @@ void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
           } else {
             os << "uint" << lanes / 2;
           }
+        } else if (lanes == 12 || lanes == 16) {
+          os << "ulonglong" << lanes / 4;
         } else {
           fail = true;
         }
@@ -537,6 +634,8 @@ void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
       } else {
         os << "uint" << lanes / 2;
       }
+    } else if (lanes == 12 || lanes == 16) {
+      os << "ulonglong" << lanes / 4;
     } else {
       fail = true;
     }
@@ -545,8 +644,12 @@ void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
     codegen_tags_.insert("fp8");
     if (lanes <= 4) {
       os << GetFP8Type(t);
-    } else {
+    } else if (lanes == 8 || lanes == 16) {
       os << "uint" << lanes / 4;
+    } else if (lanes == 32) {
+      os << "ulonglong4";
+    } else {
+      TVM_FFI_THROW(ValueError) << "Unsupported packed FP8 width: " << lanes;
     }
     return;
   } else if (IsFloat6(t)) {
@@ -561,21 +664,24 @@ void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
     codegen_tags_.insert("fp4");
     if (lanes <= 4) {
       os << GetFP4Type(t);
+    } else if (lanes == 8) {
+      os << "uint";
+    } else if (lanes == 16 || lanes == 32) {
+      os << "uint" << lanes / 8;
+    } else if (lanes == 64) {
+      os << "ulonglong4";
     } else {
-      fail = true;
+      TVM_FFI_THROW(ValueError) << "Unsupported packed FP4 width: " << lanes;
     }
     return;
   } else if (t == PrimType::Bool()) {
     os << "bool";
     return;
   } else if (t.MatchesCode(DLDataTypeCode::kDLBool) && lanes > 1) {
-    // CUDA does not support bool vectors.
-    // Use ushort vectors to represent instead.
-    int n = lanes;
-    if (n <= 4) {
-      os << "ushort" << n;
-      return;
-    }
+    std::string name = "tvm_boolx" + std::to_string(lanes);
+    AddUtilFunction(name, "struct " + name + " { bool data[" + std::to_string(lanes) + "]; };\n");
+    os << name;
+    return;
   } else if (t.MatchesCode(DLDataTypeCode::kDLUInt, DLDataTypeCode::kDLInt)) {
     if (t.bits() == 128 && t.IsScalar()) {
       // nvcc's 128-bit integer, which is what a PTX .b128 operand binds to
@@ -608,6 +714,9 @@ void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
       case 4: {
         if (t.IsScalar()) {
           os << "int";
+          return;
+        } else if (lanes == 2) {
+          os << "int8_t";
           return;
         } else if (lanes == 4) {
           os << "int16_t";
@@ -646,6 +755,9 @@ void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
         } else if (lanes == 16) {
           codegen_tags_.insert("int8");
           os << "int4";
+          return;
+        } else if (lanes == 32) {
+          os << "longlong4";
           return;
         } else if (!t.MatchesCode(DLDataTypeCode::kDLUInt) && t.IsScalar()) {
           os << "signed char";
@@ -731,13 +843,299 @@ void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
   TVM_FFI_THROW(InternalError) << "Cannot convert type " << t << " to CUDA type";
 }
 
+void CodeGenCUDA::PrintStorageType(const Type& type, std::ostream& os) {
+  auto primitive = type.as<PrimType>();
+  if (primitive && primitive.value().IsScalar() && primitive.value().bits() == 4 &&
+      primitive.value().MatchesCode(kDLInt, kDLUInt)) {
+    os << (primitive.value().MatchesCode(kDLInt) ? "int8_t" : "uint8_t");
+    return;
+  }
+  CodeGenC::PrintStorageType(type, os);
+}
+
+void CodeGenCUDA::Dispatch_(const TensorLoadNode* op, std::ostream& os) {
+  TensorVar tensor = op->source.as_or_throw<TensorVar>();
+  PrimType element = tensor.dtype();
+  if (!element.IsScalar() || element.bits() != 4 || !element.MatchesCode(kDLInt, kDLUInt)) {
+    CodeGenC::Dispatch_(op, os);
+    return;
+  }
+  TVM_FFI_CHECK_EQ(op->indices.size(), 1U, ValueError);
+  PrimType type = op->ty.as_or_throw<PrimType>();
+  PrimExpr index = op->indices[0];
+  if (type.IsScalar()) {
+    sym::Analyzer analyzer;
+    std::string captured = SSAGetID(PrintExpr(index), index.ty());
+    PrimExpr byte_offset = analyzer->Simplify(prim::FloorDiv(index, 2));
+    PrimExpr bit_offset = analyzer->Simplify(prim::FloorMod(index, 2) * 4);
+    std::string byte_index =
+        byte_offset.as<IntImmNode>() ? PrintExpr(byte_offset) : "(" + captured + " >> 1)";
+    std::string shift =
+        bit_offset.as<IntImmNode>() ? PrintExpr(bit_offset) : "((" + captured + " & 1) * 4)";
+    std::ostringstream value;
+    if (type.MatchesCode(kDLInt)) value << "(static_cast<int>(";
+    value << "((reinterpret_cast<const " << (IsVolatile(tensor.get()) ? "volatile " : "")
+          << "unsigned char*>(" << GetVarID(tensor.get()) << ")[" << byte_index << "] >> " << shift
+          << ") & 15U)";
+    if (type.MatchesCode(kDLInt)) value << " ^ 8U) - 8)";
+    HandleVolatileLoads(value.str(), op, os);
+    return;
+  }
+  bool aligned = false;
+  if (const auto* ramp = index.as<prim::RampNode>(); ramp && prim::IsOne(ramp->stride)) {
+    auto alignment = sym::Analyzer()->modular_set(ramp->base);
+    aligned = alignment->coeff % type.lanes() == 0 && alignment->base % type.lanes() == 0;
+  }
+  if (aligned) {
+    CodeGenC::Dispatch_(op, os);
+    return;
+  }
+  std::string result = name_supply_->FreshName("packed_load");
+  PrintIndent();
+  PrintType(type, stream);
+  stream << ' ' << result << "{};\n";
+  sym::Analyzer analyzer;
+  for (int lane = 0; lane < type.lanes(); ++lane) {
+    PrimExpr scalar_index = analyzer->Simplify(prim::Shuffle({index}, {IntImm::Int32(lane)}));
+    std::string value = PrintExpr(TensorLoad(tensor, {scalar_index}));
+    PrintVecElemStore(result, type, lane, value);
+  }
+  os << result;
+}
+
+void CodeGenCUDA::Dispatch_(const TensorStoreNode* op) {
+  TensorVar tensor = op->dest.as_or_throw<TensorVar>();
+  PrimType element = tensor.dtype();
+  if (!element.IsScalar() || element.bits() != 4 || !element.MatchesCode(kDLInt, kDLUInt)) {
+    CodeGenC::Dispatch_(op);
+    return;
+  }
+  TVM_FFI_CHECK_EQ(op->indices.size(), 1U, ValueError);
+  PrimType type = op->value.ty();
+  PrimExpr index = op->indices[0];
+  if (type.IsScalar()) {
+    std::string value = SSAGetID(PrintExpr(op->value), type);
+    sym::Analyzer analyzer;
+    std::string captured = SSAGetID(PrintExpr(index), index.ty());
+    PrimExpr byte_offset = analyzer->Simplify(prim::FloorDiv(index, 2));
+    PrimExpr bit_offset = analyzer->Simplify(prim::FloorMod(index, 2) * 4);
+    std::string byte_index =
+        byte_offset.as<IntImmNode>() ? PrintExpr(byte_offset) : "(" + captured + " >> 1)";
+    std::string shift =
+        bit_offset.as<IntImmNode>() ? PrintExpr(bit_offset) : "((" + captured + " & 1) * 4)";
+    std::string pointer = "reinterpret_cast<" +
+                          std::string(IsVolatile(tensor.get()) ? "volatile " : "") +
+                          "unsigned char*>(" + GetVarID(tensor.get()) + ")";
+    std::string reference = "(" + pointer + ")[" + byte_index + "]";
+    PrintIndent();
+    stream << reference << " = (" << reference << " & ~(15U << " << shift
+           << ")) | ((static_cast<unsigned int>(" << value << ") & 15U) << " << shift << ");\n";
+    return;
+  }
+  bool aligned = false;
+  if (const auto* ramp = index.as<prim::RampNode>(); ramp && prim::IsOne(ramp->stride)) {
+    auto alignment = sym::Analyzer()->modular_set(ramp->base);
+    aligned = alignment->coeff % type.lanes() == 0 && alignment->base % type.lanes() == 0;
+  }
+  TVM_FFI_CHECK(aligned, ValueError) << "Packed integer vector stores require a unit-stride ramp "
+                                        "with base provably divisible by the vector lane count";
+  CodeGenC::Dispatch_(op);
+}
+
 void CodeGenCUDA::PrintVecConstructor(const PrimType& t, std::ostream& os) {
+  if (IsPackedInteger(t)) {
+    std::ostringstream result_type;
+    PrintType(t, result_type);
+    os << "([](auto... values) { " << result_type.str()
+       << " result{}; unsigned char elements[] = {static_cast<unsigned char>(values)...}; "
+       << "static_assert(sizeof...(values) == " << t.lanes() << "); "
+       << "auto* bytes = reinterpret_cast<unsigned char*>(&result); "
+       << "for (unsigned int lane = 0; lane < sizeof...(values); ++lane) "
+       << "bytes[lane / 2] |= (elements[lane] & 15U) << ((lane % 2) * 4); return result; })";
+    return;
+  }
+  if (IsCustomDType(t) || IsWideInteger(t) || t.MatchesCode(kDLBool) ||
+      (t.bits() == 16 && t.lanes() > 4 && t.MatchesCode(kDLFloat, kDLBfloat)) ||
+      (t.MatchesElementType(kDLFloat, 32) && t.lanes() > 8) ||
+      (t.bits() == 8 && t.lanes() == 32 && t.MatchesCode(kDLInt, kDLUInt))) {
+    std::ostringstream result_type;
+    PrintType(t, result_type);
+    std::ostringstream element_type;
+    PrintType(t.WithLanes(1), element_type);
+    os << "([](auto... values) { " << result_type.str() << " result{}; " << element_type.str()
+       << " elements[] = {(static_cast<" << element_type.str()
+       << ">(values))...}; static_assert(sizeof(result) == sizeof(elements)); "
+       << "for (unsigned int lane = 0; lane < sizeof...(values); ++lane) { "
+       << "reinterpret_cast<" << element_type.str() << "*>(&result)[lane] = elements[lane]; "
+       << "} return result; })";
+    return;
+  }
+  if (IsFloat4(t) || IsFloat8(t)) {
+    std::ostringstream result_type;
+    PrintType(t, result_type);
+    std::ostringstream element_type;
+    PrintType(t.WithLanes(1), element_type);
+    os << "([](auto... values) { " << result_type.str()
+       << " result{}; unsigned char elements[] = {(static_cast<" << element_type.str()
+       << ">(values).__x)...}; "
+       << "auto* bytes = reinterpret_cast<unsigned char*>(&result); "
+       << "for (unsigned int lane = 0; lane < sizeof...(values); ++lane) { ";
+    if (IsFloat4(t)) {
+      os << "bytes[lane / 2] |= (elements[lane] & 15U) << ((lane % 2) * 4); ";
+    } else {
+      os << "bytes[lane] = elements[lane]; ";
+    }
+    os << "} return result; })";
+    return;
+  }
   os << "make_";
   PrintType(t, os);
 }
 
+void CodeGenCUDA::Dispatch_(const prim::MinNode* node, std::ostream& output) {
+  PrimType type = node->ty.as_or_throw<PrimType>();
+  if (!IsFloat8(type)) {
+    CodeGenC::Dispatch_(node, output);
+    return;
+  }
+  PrimType compute_type = PrimType::Float(32).WithLanes(type.lanes());
+  PrintExpr(
+      prim::cast(prim::Min(prim::cast(node->a, compute_type), prim::cast(node->b, compute_type)),
+                 type),
+      output);
+}
+
+void CodeGenCUDA::Dispatch_(const prim::MaxNode* node, std::ostream& output) {
+  PrimType type = node->ty.as_or_throw<PrimType>();
+  if (!IsFloat8(type)) {
+    CodeGenC::Dispatch_(node, output);
+    return;
+  }
+  PrimType compute_type = PrimType::Float(32).WithLanes(type.lanes());
+  PrintExpr(
+      prim::cast(prim::Max(prim::cast(node->a, compute_type), prim::cast(node->b, compute_type)),
+                 type),
+      output);
+}
+
+bool CodeGenCUDA::PrintLowPrecisionComparison(const std::string& operation, PrimExpr left,
+                                              PrimExpr right, std::ostream& output) {
+  PrimType operand_type = left.ty();
+  if (!IsFloat8(operand_type) && !IsFloat4(operand_type)) return false;
+  PrimType compute_type = PrimType::Float(32).WithLanes(operand_type.lanes());
+  left = prim::cast(left, compute_type);
+  right = prim::cast(right, compute_type);
+  if (operand_type.IsScalar()) {
+    output << '(';
+    PrintExpr(left, output);
+    output << ' ' << operation << ' ';
+    PrintExpr(right, output);
+    output << ')';
+  } else {
+    PrintVecBinaryOp(operation, PrimType::Bool().WithLanes(operand_type.lanes()), left, right,
+                     output);
+  }
+  return true;
+}
+
+void CodeGenCUDA::Dispatch_(const prim::EQNode* node, std::ostream& output) {
+  if (!PrintLowPrecisionComparison("==", node->a, node->b, output))
+    CodeGenC::Dispatch_(node, output);
+}
+
+void CodeGenCUDA::Dispatch_(const prim::NENode* node, std::ostream& output) {
+  if (!PrintLowPrecisionComparison("!=", node->a, node->b, output))
+    CodeGenC::Dispatch_(node, output);
+}
+
+void CodeGenCUDA::Dispatch_(const prim::LTNode* node, std::ostream& output) {
+  if (!PrintLowPrecisionComparison("<", node->a, node->b, output))
+    CodeGenC::Dispatch_(node, output);
+}
+
+void CodeGenCUDA::Dispatch_(const prim::LENode* node, std::ostream& output) {
+  if (!PrintLowPrecisionComparison("<=", node->a, node->b, output))
+    CodeGenC::Dispatch_(node, output);
+}
+
+void CodeGenCUDA::Dispatch_(const prim::GTNode* node, std::ostream& output) {
+  if (!PrintLowPrecisionComparison(">", node->a, node->b, output))
+    CodeGenC::Dispatch_(node, output);
+}
+
+void CodeGenCUDA::Dispatch_(const prim::GENode* node, std::ostream& output) {
+  if (!PrintLowPrecisionComparison(">=", node->a, node->b, output))
+    CodeGenC::Dispatch_(node, output);
+}
+
 void CodeGenCUDA::PrintVecBinaryOp(const std::string& op, const PrimType& t, PrimExpr lhs,
                                    PrimExpr rhs, std::ostream& os) {  // NOLINT(*)
+  auto architecture = target->GetAttr<ffi::String>("arch").value_or("");
+  int compute_version = architecture.starts_with("sm_") ? std::stoi(architecture.substr(3)) : 0;
+  std::string packed_intrinsic;
+  bool packed_subtract = false;
+  if (t.lanes() % 2 == 0) {
+    if ((t.MatchesElementType(kDLFloat, 16) && compute_version >= 53) ||
+        (t.MatchesElementType(kDLBfloat, 16) && compute_version >= 80)) {
+      if (op == "+") packed_intrinsic = "__hadd2";
+      if (op == "-") packed_intrinsic = "__hsub2";
+      if (op == "*") packed_intrinsic = "__hmul2";
+      if (op == "min" && compute_version >= 80) packed_intrinsic = "__hmin2";
+      if (op == "max" && compute_version >= 80) packed_intrinsic = "__hmax2";
+    } else if (t.MatchesElementType(kDLFloat, 32) && compute_version >= 100) {
+      if (op == "+") packed_intrinsic = "__fadd2_rn";
+      if (op == "*") packed_intrinsic = "__fmul2_rn";
+      packed_subtract = op == "-";
+    }
+  }
+  ffi::Optional<PrimExpr> addend;
+  if (op == "+" && !packed_intrinsic.empty()) {
+    const auto* product = lhs.as<prim::MulNode>();
+    if (product) {
+      addend = rhs;
+    } else if ((product = rhs.as<prim::MulNode>())) {
+      addend = lhs;
+    }
+    if (product) {
+      PrimExpr first_factor = product->a;
+      PrimExpr second_factor = product->b;
+      lhs = first_factor;
+      rhs = second_factor;
+      packed_intrinsic = t.bits() == 32 ? "__ffma2_rn" : "__hfma2";
+    }
+  }
+  if (!packed_intrinsic.empty() || packed_subtract) {
+    std::string result = name_supply_->FreshName("packed_result");
+    PrintIndent();
+    PrintType(t, stream);
+    stream << " " << result << ";\n";
+    std::string left = SSAGetID(PrintExpr(lhs), lhs.ty());
+    std::string right = SSAGetID(PrintExpr(rhs), rhs.ty());
+    std::string accumulator = addend ? SSAGetID(PrintExpr(*addend), addend.value().ty()) : "";
+    std::ostringstream pair_type;
+    PrintType(t.WithLanes(2), pair_type);
+    for (int pair = 0; pair < t.lanes() / 2; ++pair) {
+      PrintIndent();
+      if (packed_subtract) {
+        stream << "asm(\"sub.rn.f32x2 %0, %1, %2;\" : \"=l\"(reinterpret_cast<uint64_t*>(&"
+               << result << ")[" << pair << "]) : \"l\"(reinterpret_cast<const uint64_t*>(&" << left
+               << ")[" << pair << "]), \"l\"(reinterpret_cast<const uint64_t*>(&" << right << ")["
+               << pair << "]));\n";
+      } else {
+        stream << "reinterpret_cast<" << pair_type.str() << "*>(&" << result << ")[" << pair
+               << "] = " << packed_intrinsic << "(reinterpret_cast<const " << pair_type.str()
+               << "*>(&" << left << ")[" << pair << "], reinterpret_cast<const " << pair_type.str()
+               << "*>(&" << right << ")[" << pair << "]";
+        if (addend) {
+          stream << ", reinterpret_cast<const " << pair_type.str() << "*>(&" << accumulator << ")["
+                 << pair << "]";
+        }
+        stream << ");\n";
+      }
+    }
+    os << result;
+    return;
+  }
   // Declare the result.
   std::string sret = name_supply_->FreshName("_");
   this->PrintIndent();
@@ -749,6 +1147,34 @@ void CodeGenCUDA::PrintVecBinaryOp(const std::string& op, const PrimType& t, Pri
     std::string vlhs = SSAGetID(PrintExpr(lhs), lhs.ty());
     std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.ty());
 
+    std::string comparison;
+    if (t.MatchesCode(kDLBool) && t.lanes() % 2 == 0 && lhs.ty() == rhs.ty() &&
+        lhs.ty().bits() == 16 && lhs.ty().MatchesCode(kDLFloat, kDLBfloat)) {
+      if (op == "==") comparison = "eq";
+      if (op == "!=") comparison = "neu";
+      if (op == "<") comparison = "lt";
+      if (op == "<=") comparison = "le";
+      if (op == ">") comparison = "gt";
+      if (op == ">=") comparison = "ge";
+    }
+    if (!comparison.empty()) {
+      stream << "#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= "
+             << (lhs.ty().MatchesCode(kDLBfloat) ? 900 : 530)
+             << ") && defined(CUDART_VERSION) && (CUDART_VERSION >= 12000)\n";
+      std::ostringstream pair_type;
+      PrintType(lhs.ty().WithLanes(2), pair_type);
+      for (int pair = 0; pair < t.lanes() / 2; ++pair) {
+        std::string mask = name_supply_->FreshName("comparison_mask");
+        PrintIndent();
+        stream << "unsigned int " << mask << " = __h" << comparison
+               << "2_mask(reinterpret_cast<const " << pair_type.str() << "*>(&" << vlhs << ")["
+               << pair << "], reinterpret_cast<const " << pair_type.str() << "*>(&" << vrhs << ")["
+               << pair << "]);\n";
+        PrintVecElemStore(sret, t, pair * 2, "(" + mask + " & 1u)");
+        PrintVecElemStore(sret, t, pair * 2 + 1, "((" + mask + " >> 16) & 1u)");
+      }
+      stream << "#else\n";
+    }
     for (int i = 0, lanes = t.lanes(); i < lanes; ++i) {
       std::ostringstream value_temp;
       if (isalpha(op[0])) {
@@ -766,6 +1192,7 @@ void CodeGenCUDA::PrintVecBinaryOp(const std::string& op, const PrimType& t, Pri
       }
       PrintVecElemStore(sret, t, i, value_temp.str());
     }
+    if (!comparison.empty()) stream << "#endif\n";
   }
   EndScope(ssa_scope);
   os << sret;
@@ -779,6 +1206,40 @@ void CodeGenCUDA::PrintVecElemLoad(const std::string& vec, const PrimType& t, in
     return;
   }
 
+  if (IsPackedInteger(t)) {
+    TVM_FFI_ICHECK(i >= 0 && i < lanes);
+    if (t.MatchesCode(kDLInt)) os << "(static_cast<int>(";
+    os << "((reinterpret_cast<const unsigned char*>(&(" << vec << "))[" << i / 2 << "] >> "
+       << (i % 2) * 4 << ") & 15U)";
+    if (t.MatchesCode(kDLInt)) os << " ^ 8U) - 8)";
+    return;
+  }
+
+  if (IsFloat4(t) || IsFloat8(t)) {
+    TVM_FFI_ICHECK(i >= 0 && i < lanes);
+    os << "([](unsigned char bits) { ";
+    PrintType(t.WithLanes(1), os);
+    os << " result; result.__x = bits; return result; })(";
+    if (IsFloat4(t)) {
+      os << "(reinterpret_cast<const unsigned char*>(&(" << vec << "))[" << i / 2 << "] >> "
+         << (i % 2) * 4 << ") & 15U";
+    } else {
+      os << "reinterpret_cast<const unsigned char*>(&(" << vec << "))[" << i << "]";
+    }
+    os << ")";
+    return;
+  }
+
+  if (IsCustomDType(t) || IsWideInteger(t) || t.MatchesCode(kDLBool) ||
+      ((lanes == 12 || lanes == 16) && t.bits() == 16 && t.MatchesCode(kDLFloat, kDLBfloat)) ||
+      (t.MatchesElementType(kDLFloat, 32) && lanes > 8) ||
+      (lanes == 32 && t.bits() == 8 && t.MatchesCode(kDLInt, kDLUInt))) {
+    TVM_FFI_ICHECK(i >= 0 && i < lanes);
+    os << "reinterpret_cast<const ";
+    PrintType(t.WithLanes(1), os);
+    os << "*>(&(" << vec << "))[" << i << "]";
+    return;
+  }
   static const char access[] = {'x', 'y', 'z', 'w'};
   TVM_FFI_ICHECK(i >= 0 && i < (t.bits() == 8 ? 16 : (t.bits() == 16 || t.bits() == 32) ? 8 : 4));
   if (t.bits() == 8 && (t.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt))) {
@@ -820,9 +1281,6 @@ void CodeGenCUDA::PrintVecElemLoad(const std::string& vec, const PrimType& t, in
     }
     TVM_FFI_ICHECK(!type_name.empty());
     os << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2] << ")))->" << access[i % 2];
-  } else if (IsFloat4(t)) {
-    os << "([](__nv_fp4_storage_t v) { __nv_fp4_e2m1 t; t.__x = v; return t; })((" << vec
-       << ".__x >> " << i * 4 << ") & 0xF)";
   } else {
     os << vec << "." << access[i];
   }
@@ -832,6 +1290,40 @@ void CodeGenCUDA::PrintVecElemStore(const std::string& vec, const PrimType& t, i
                                     const std::string& value) {
   int lanes = t.lanes();
   this->PrintIndent();
+  if (IsPackedInteger(t)) {
+    TVM_FFI_ICHECK(i >= 0 && i < lanes);
+    stream << "{ auto* bytes = reinterpret_cast<unsigned char*>(&(" << vec << ")); bytes[" << i / 2
+           << "] = ";
+    if (i % 2) stream << "(bytes[" << i / 2 << "] & 15U) | ";
+    stream << "((static_cast<unsigned int>(" << value << ") & 15U) << " << (i % 2) * 4 << "); }\n";
+    return;
+  }
+  if (IsFloat4(t) || IsFloat8(t)) {
+    TVM_FFI_ICHECK(i >= 0 && i < lanes);
+    stream << "{ unsigned char element = static_cast<";
+    PrintType(t.WithLanes(1), stream);
+    stream << ">(" << value << ").__x; auto* bytes = reinterpret_cast<unsigned char*>(&(" << vec
+           << ")); ";
+    if (IsFloat4(t)) {
+      stream << "bytes[" << i / 2 << "] = ";
+      if (i % 2) stream << "(bytes[" << i / 2 << "] & 15U) | ";
+      stream << "((element & 15U) << " << (i % 2) * 4 << "); ";
+    } else {
+      stream << "bytes[" << i << "] = element; ";
+    }
+    stream << "}\n";
+    return;
+  }
+  if (IsCustomDType(t) || IsWideInteger(t) || t.MatchesCode(kDLBool) ||
+      ((lanes == 12 || lanes == 16) && t.bits() == 16 && t.MatchesCode(kDLFloat, kDLBfloat)) ||
+      (t.MatchesElementType(kDLFloat, 32) && lanes > 8) ||
+      (lanes == 32 && t.bits() == 8 && t.MatchesCode(kDLInt, kDLUInt))) {
+    TVM_FFI_ICHECK(i >= 0 && i < lanes);
+    stream << "reinterpret_cast<";
+    PrintType(t.WithLanes(1), stream);
+    stream << "*>(&(" << vec << "))[" << i << "] = " << value << ";\n";
+    return;
+  }
   static const char access[] = {'x', 'y', 'z', 'w'};
   TVM_FFI_ICHECK(i >= 0 && i < (t.bits() == 8 ? 16 : (t.bits() == 16 || t.bits() == 32) ? 8 : 4));
   if (t.bits() == 8 && (t.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt))) {
@@ -888,12 +1380,49 @@ void CodeGenCUDA::PrintVecElemStore(const std::string& vec, const PrimType& t, i
 void CodeGenCUDA::PrintStorageSync(const CallNode* op) {
   const std::string& sync = op->args[0].as<StringImmNode>()->value;
   if (sync == "warp") {
-    // DO nothing.
-  } else if (sync == "shared" || sync == "shared.dyn") {
+    TVM_FFI_CHECK(op->args.size() <= 2, ValueError)
+        << "Warp synchronization takes at most one participation mask";
+    std::string mask = op->args.size() == 2 ? PrintExpr(op->args[1]) : "0xffffffffu";
     this->PrintIndent();
-    this->stream << "__syncthreads();\n";
+    this->stream << "__syncwarp((unsigned)(" << mask << "));\n";
+  } else if (sync == "shared" || sync == "shared.dyn") {
+    TVM_FFI_CHECK(op->args.size() <= 3, ValueError)
+        << "Shared synchronization takes a barrier identifier and an optional thread count";
+    if (op->args.size() == 1) {
+      this->PrintIndent();
+      this->stream << "__syncthreads();\n";
+      return;
+    }
+    if (const auto* identifier = op->args[1].as<IntImmNode>()) {
+      TVM_FFI_CHECK(identifier->value >= 0 && identifier->value < 16, ValueError)
+          << "CUDA named barrier identifiers must be in [0, 16)";
+    }
+    std::string identifier = PrintExpr(op->args[1]);
+    std::string count;
+    if (op->args.size() == 3) {
+      if (const auto* threads = op->args[2].as<IntImmNode>()) {
+        TVM_FFI_CHECK(threads->value > 0 && threads->value <= 1024 && threads->value % 32 == 0,
+                      ValueError)
+            << "CUDA named barrier thread counts must be positive multiples of 32, at most 1024";
+      }
+      count = PrintExpr(op->args[2]);
+    }
+    this->PrintIndent();
+    this->stream << "asm volatile(\"bar.sync %0" << (count.empty() ? "" : ", %1")
+                 << ";\" : : \"r\"((unsigned)(" << identifier << "))";
+    if (!count.empty()) this->stream << ", \"r\"((unsigned)(" << count << "))";
+    this->stream << " : \"memory\");\n";
+  } else if (sync == "cluster") {
+    TVM_FFI_CHECK_EQ(op->args.size(), 1, ValueError)
+        << "Cluster storage synchronization does not take named-barrier operands";
+    this->PrintIndent();
+    this->stream << "asm volatile(\"barrier.cluster.arrive.aligned;\" : : : \"memory\");\n";
+    this->PrintIndent();
+    this->stream << "asm volatile(\"barrier.cluster.wait.aligned;\" : : : \"memory\");\n";
   } else if (sync == "global") {
     TVM_FFI_THROW(InternalError) << "Global storage synchronization is unsupported";
+  } else {
+    TVM_FFI_THROW(ValueError) << "Unsupported CUDA storage synchronization scope: " << sync;
   }
 }
 
@@ -916,6 +1445,12 @@ void CodeGenCUDA::PrintStorageScope(const runtime::MemoryScope& scope,
 std::string CodeGenCUDA::CastFromTo(std::string value, const PrimType& from,
                                     const PrimType& target) {
   if (from == target) return value;
+  if (IsCustomDType(from) || IsCustomDType(target)) {
+    PrimType custom = IsCustomDType(target) ? target : from;
+    TVM_FFI_CHECK(CustomDTypeStorage(custom).MatchesCode(kDLFloat), ValueError)
+        << "CUDA custom dtype has no numeric conversion: " << custom;
+    value = "static_cast<float>(" + value + ")";
+  }
   std::ostringstream os;
   os << "((";
   this->PrintType(target, os);
@@ -948,19 +1483,12 @@ void CodeGenCUDA::Dispatch_(const prim::CastNode* op, std::ostream& os) {
   TVM_FFI_ICHECK_EQ(target_ty.lanes(), from_ty.lanes());
 
   // Emit simple C-style type conversion.
-  if (from_ty.IsScalar()) return CodeGenC::Dispatch_(op, os);
-
-  if (IsPackedFloat(target_ty) || IsPackedFloat(from_ty)) {
-    std::ostringstream val;
-    if (target_ty.MatchesCode(DLDataTypeCode::kDLBfloat) && target_ty.lanes() == 2) {
-      val << "cast_to_nv_bfloat162(" << PrintExpr(op->value) << ")";
-    } else {
-      val << "(";
-      PrintType(target_ty, val);
-      val << ")(" << PrintExpr(op->value) << ")";
+  if (from_ty.IsScalar()) {
+    if (IsCustomDType(from_ty) || IsCustomDType(target_ty)) {
+      os << CastFromTo(PrintExpr(op->value), from_ty, target_ty);
+      return;
     }
-    os << val.str();
-    return;
+    return CodeGenC::Dispatch_(op, os);
   }
 
   // We could emit make_float4 like calls, but the emitted code looks
@@ -968,17 +1496,14 @@ void CodeGenCUDA::Dispatch_(const prim::CastNode* op, std::ostream& os) {
   std::string sret = name_supply_->FreshName("_");
   this->PrintIndent();
   this->PrintType(target_ty, stream);
-  stream << ' ' << sret << ";\n";
+  stream << ' ' << sret << " = {};\n";
   {
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
       std::ostringstream val;
-      val << "(";
-      PrintType(target_ty.WithLanes(1), val);
-      val << ")(";
       PrintVecElemLoad(src, from_ty, i, val);
-      val << ")";
-      PrintVecElemStore(sret, target_ty, i, val.str());
+      PrintVecElemStore(sret, target_ty, i,
+                        CastFromTo(val.str(), from_ty.WithLanes(1), target_ty.WithLanes(1)));
     }
   }
   os << sret;
@@ -1078,14 +1603,20 @@ void CodeGenCUDA::Dispatch_(const CallNode* op, std::ostream& os) {
   }
 
   auto print_cuda_func_call = [&](const CallNode* op, std::ostream& os) {
+    TVM_FFI_CHECK(op->op.same_as(Op::Get("tirx.cuda.func_call")), ValueError)
+        << "CUDA codegen callbacks must return tirx.cuda.func_call";
+    if (auto result_type = op->ty.as<PrimType>()) {
+      std::ostringstream type_name;
+      PrintType(*result_type, type_name);
+    }
     TVM_FFI_ICHECK_GE(op->args.size(), 2U);
     size_t num_args = op->args.size() - 2;
     std::vector<std::string> args;
     for (size_t i = 1; i < num_args + 1; i++) {
       args.push_back(this->PrintExpr(op->args[i]));
     }
-    std::string source_code = op->args[num_args + 1].as<StringImmNode>()->value;
-    std::string func_name = op->args[0].as<StringImmNode>()->value;
+    std::string source_code = op->args[num_args + 1].as_or_throw<StringImm>()->value;
+    std::string func_name = op->args[0].as_or_throw<StringImm>()->value;
     os << func_name << "(";
     for (size_t i = 0; i < num_args; i++) {
       const auto& arg = args[i];
@@ -1253,7 +1784,9 @@ void CodeGenCUDA::DispatchAllocTensor(const BindNode* op, const CallNode* buffer
   DLDataType dtype = buffer_call->ty_args[0].as_or_throw<tirx::TensorType>()->dtype->dtype;
   runtime::MemoryScope scope = buffer_call->ty_args[0].as_or_throw<tirx::TensorType>()->scope;
   TensorVar buffer = op->var.as_or_throw<TensorVar>();
-  DictAttrs annotations = buffer_call->attrs.value().as_or_throw<DictAttrs>();
+  DictAttrs annotations = buffer_call->attrs.has_value()
+                              ? buffer_call->attrs.value().as_or_throw<DictAttrs>()
+                              : DictAttrs(ffi::Map<ffi::String, ffi::Any>{});
   TVM_FFI_ICHECK(buffer.defined());
   std::string vid = AllocVarID(buffer.get(), buffer->name + "_ptr");
 
@@ -1265,7 +1798,7 @@ void CodeGenCUDA::DispatchAllocTensor(const BindNode* op, const CallNode* buffer
   } else if (align > 0) {
     stream << "alignas(" << align << ") ";
   }
-  PrintType(PrimType(dtype), stream);
+  PrintStorageType(PrimType(dtype), stream);
 
   if (scope == scope_shared_dyn) {
     stream << ' ' << vid << "[];\n";
@@ -1279,11 +1812,11 @@ void CodeGenCUDA::DispatchAllocTensor(const BindNode* op, const CallNode* buffer
     }
     TVM_FFI_ICHECK_GT(constant_size, 0) << "Can only handle constant size stack allocation for now";
 
-    bool is_packed_integer_dtype = PrimType(dtype) == PrimType::Int(4) ||
-                                   PrimType(dtype) == PrimType::UInt(4) ||
-                                   PrimType(dtype) == PrimType::Int(1);
-    if (is_packed_integer_dtype && scope == scope_shared) {
-      constant_size = constant_size / (32 / dtype.bits);
+    if (PrimType(dtype) == PrimType::Int(4) || PrimType(dtype) == PrimType::UInt(4) ||
+        (IsFloat4(PrimType(dtype)) && dtype.bits == 4 && dtype.lanes == 1)) {
+      constant_size = (constant_size + 1) / 2;
+    } else if (PrimType(dtype) == PrimType::Int(1) && scope == scope_shared) {
+      constant_size = constant_size / 32;
     }
     stream << ' ' << vid << '[' << constant_size << "];\n";
   }
@@ -1302,18 +1835,6 @@ void CodeGenCUDA::Dispatch_(const EvaluateNode* op) {
 void CodeGenCUDA::Dispatch_(const prim::RampNode* op, std::ostream& os) {
   PrimType op_ty = op->ty.as_or_throw<PrimType>();
   int lanes = op_ty.lanes();
-  if (lanes <= 4) {
-    PrintVecConstructor(op_ty, os);
-    os << "(";
-    for (int i = 0; i < lanes; i++) {
-      os << "(" << PrintExpr(op->base) << ")"
-         << "+(" << PrintExpr(op->stride) << "*" << i << ")";
-      if (i != lanes - 1) os << ", ";
-    }
-    os << ")";
-    return;
-  }
-
   // Use lane-wise stores for wide vectors (e.g. fp16x8/int32x8), where CUDA
   // constructor argument layout does not match TIR vector lane layout.
   std::string sret = name_supply_->FreshName("_");
@@ -1337,116 +1858,62 @@ void CodeGenCUDA::Dispatch_(const prim::RampNode* op, std::ostream& os) {
 void CodeGenCUDA::Dispatch_(const prim::BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
   PrimType op_ty = op->ty.as_or_throw<PrimType>();
   int lanes = op_ty.lanes();
-  if ((op_ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt)) && op_ty.bits() == 8 &&
-      lanes == 4) {
-    // make_int8x4
-    const auto* imm = op->value.as<IntImmNode>();
-    auto p = imm ? imm->value.as<int64_t>() : std::nullopt;
-    TVM_FFI_ICHECK(p.has_value());
-    int64_t v = *p & 0xFF;
-    v = (v << 24) | (v << 16) | (v << 8) | v;
-    if (op_ty.MatchesCode(DLDataTypeCode::kDLUInt)) {
-      os << "(uint)" << v;
+  if (IsWideInteger(op_ty) || IsPackedInteger(op_ty) ||
+      (op_ty.bits() == 32 && lanes > 4 && lanes <= 8 &&
+       op_ty.MatchesCode(kDLInt, kDLUInt, kDLFloat)) ||
+      (op_ty.bits() == 8 && lanes == 32 && op_ty.MatchesCode(kDLInt, kDLUInt))) {
+    std::string value = SSAGetID(PrintExpr(op->value), op->value.ty());
+    std::string result = name_supply_->FreshName("broadcast");
+    PrintIndent();
+    PrintType(op_ty, stream);
+    stream << ' ' << result << ";\n";
+    for (int lane = 0; lane < lanes; ++lane) {
+      PrintVecElemStore(result, op_ty, lane, value);
+    }
+    os << result;
+    return;
+  }
+  if (op_ty.MatchesCode(kDLInt, kDLUInt) && op_ty.bits() == 8 &&
+      (lanes == 4 || lanes == 8 || lanes == 16)) {
+    std::string value = SSAGetID(PrintExpr(op->value), op->value.ty());
+    std::string word = "(" + std::string(op_ty.MatchesCode(kDLUInt) ? "uint" : "int") +
+                       ")(((uint)(" + value + ") & 255U) * 16843009U)";
+    if (lanes == 4) {
+      os << word;
     } else {
-      os << "(int)" << v;
+      PrintVecConstructor(op_ty, os);
+      os << '(';
+      for (int lane = 0; lane < lanes / 4; ++lane) {
+        if (lane != 0) os << ", ";
+        os << word;
+      }
+      os << ')';
     }
     return;
   }
 
-  if (op_ty.MatchesElementType(DLDataTypeCode::kDLFloat, 16)) {
-    std::string v = PrintExpr(op->value);
+  if (op_ty.bits() == 16 && op_ty.MatchesCode(kDLFloat, kDLBfloat)) {
+    std::string value = SSAGetID(PrintExpr(op->value), op->value.ty());
     PrintVecConstructor(op_ty, os);
     os << '(';
-    if (lanes <= 4) {
-      for (int i = 0; i < lanes / 2; ++i) {
-        if (i != 0) os << ", ";
-        os << v << ", " << v;
-      }
-    } else {
-      for (int i = 0; i < lanes / 2; ++i) {
-        if (i != 0) os << ", ";
-        os << "__pack_half2(" << v << ", " << v << ")";
-      }
-    }
-    os << ')';
-    return;
-  }
-
-  if (op_ty.MatchesElementType(DLDataTypeCode::kDLBfloat, 16)) {
-    std::string v = PrintExpr(op->value);
-    PrintVecConstructor(op_ty, os);
-    os << '(';
-    if (lanes > 4) {
-      for (int i = 0; i < lanes / 2; ++i) {
-        if (i != 0) os << ", ";
-        os << "__pack_nv_bfloat162(" << v << ", " << v << ")";
-      }
-    } else {
-      for (int i = 0; i < lanes; ++i) {
-        if (i != 0) os << ", ";
-        os << v;
-      }
+    for (int lane = 0; lane < lanes; ++lane) {
+      if (lane != 0) os << ", ";
+      os << value;
     }
     os << ')';
     return;
   }
 
   if (IsFloat8(op_ty) || IsFloat4(op_ty)) {
-    TVM_FFI_ICHECK(lanes == 1 || lanes == 2 || lanes == 4);
-    std::string v = PrintExpr(op->value);
-    // Implicit conversion from float back to fp8
-    PrintType(op_ty, os);
-    os << "(make_float" << lanes << "(";
+    std::string value = SSAGetID(PrintExpr(op->value), op->value.ty());
+    PrintVecConstructor(op_ty, os);
+    os << "(";
     for (int i = 0; i < lanes; ++i) {
       if (i != 0) os << ", ";
-      os << "static_cast<float>(" << v << ")";
+      os << value;
     }
-    os << "))";
+    os << ")";
     return;
-  }
-
-  if ((op_ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt)) && op_ty.bits() == 4) {
-    bool fail = false;
-    const auto* imm = op->value.as<IntImmNode>();
-    auto p = imm ? imm->value.as<int64_t>() : std::nullopt;
-    TVM_FFI_ICHECK(p.has_value());
-    int64_t v = *p & 0xF;
-
-    if (lanes == 4) {
-      v = (v << 12) | (v << 8) | (v << 4) | v;
-      if (op_ty.MatchesCode(DLDataTypeCode::kDLUInt)) {
-        os << "(uint16_t)" << v;
-      } else {
-        os << "(int16_t)" << v;
-      }
-    } else {
-      v = (v << 28) | (v << 24) | (v << 20) | (v << 16) | (v << 12) | (v << 8) | (v << 4) | v;
-      if (lanes == 8) {
-        if (op_ty.MatchesCode(DLDataTypeCode::kDLUInt)) {
-          os << "(uint)" << v;
-        } else {
-          os << "(int)" << v;
-        }
-      } else if (lanes == 16 || lanes == 32) {
-        PrintVecConstructor(op_ty, os);
-        os << '(';
-        for (int i = 0; i < lanes / 8; ++i) {
-          if (i != 0) os << ", ";
-          if (op_ty.MatchesCode(DLDataTypeCode::kDLUInt)) {
-            os << "(uint)" << v;
-          } else {
-            os << "(int)" << v;
-          }
-        }
-        os << ')';
-      } else {
-        fail = true;
-      }
-    }
-
-    if (!fail) {
-      return;
-    }
   }
 
   std::string v = PrintExpr(op->value);
@@ -1457,6 +1924,48 @@ void CodeGenCUDA::Dispatch_(const prim::BroadcastNode* op, std::ostream& os) {  
     os << v;
   }
   os << ')';
+}
+
+void CodeGenCUDA::Dispatch_(const prim::NotNode* op, std::ostream& os) {
+  PrimType dtype = op->ty.as_or_throw<PrimType>();
+  if (dtype.IsScalar()) {
+    CodeGenC::Dispatch_(op, os);
+    return;
+  }
+  std::string value = SSAGetID(PrintExpr(op->a), op->a.ty());
+  std::string result = name_supply_->FreshName("logical_not");
+  PrintIndent();
+  PrintType(dtype, stream);
+  stream << ' ' << result << ";\n";
+  for (int lane = 0; lane < dtype.lanes(); ++lane) {
+    std::ostringstream element;
+    element << "!(";
+    PrintVecElemLoad(value, op->a.ty(), lane, element);
+    element << ')';
+    PrintVecElemStore(result, dtype, lane, element.str());
+  }
+  os << result;
+}
+
+void CodeGenCUDA::Dispatch_(const prim::BitwiseNotNode* node, std::ostream& output) {
+  PrimType type = node->ty.as_or_throw<PrimType>();
+  if (type.IsScalar() || type.MatchesCode(kDLBool)) {
+    CodeGenC::Dispatch_(node, output);
+    return;
+  }
+  std::string input = SSAGetID(PrintExpr(node->a), node->a.ty());
+  std::string result = name_supply_->FreshName("bitwise_not");
+  PrintIndent();
+  PrintType(type, stream);
+  stream << ' ' << result << ";\n";
+  for (int lane = 0; lane < type.lanes(); ++lane) {
+    std::ostringstream value;
+    value << "~(";
+    PrintVecElemLoad(input, type, lane, value);
+    value << ')';
+    PrintVecElemStore(result, type, lane, value.str());
+  }
+  output << result;
 }
 
 void CodeGenCUDA::Dispatch_(const prim::SelectNode* op, std::ostream& os) {
@@ -1476,18 +1985,16 @@ void CodeGenCUDA::Dispatch_(const prim::SelectNode* op, std::ostream& os) {
   this->PrintType(op_ty, stream);
   stream << ' ' << r_var << ";\n";
   {
-    std::string c_var = SSAGetID(PrintExpr(op->condition), op_ty);
+    std::string c_var = SSAGetID(PrintExpr(op->condition), op->condition.ty());
     std::string t_var = SSAGetID(PrintExpr(op->true_value), op_ty);
     std::string f_var = SSAGetID(PrintExpr(op->false_value), op_ty);
 
-    // The condition is stored as an ushort vector.
     int lanes = op_ty.lanes();
-    PrimType memory_ty = PrimType::UInt(16, lanes);
 
     for (int i = 0; i < lanes; ++i) {
       std::ostringstream item;
       item << "(bool(";
-      PrintVecElemLoad(c_var, memory_ty, i, item);
+      PrintVecElemLoad(c_var, op->condition.ty(), i, item);
       item << ")?";
       PrintVecElemLoad(t_var, op_ty, i, item);
       item << ':';
@@ -1504,16 +2011,25 @@ inline void PrintConst(const FloatImmNode* op, std::ostream& os, CodeGenCUDA* p)
   // Type code is kBFloat
   if (op_ty.MatchesElementType(DLDataTypeCode::kDLBfloat, 16)) {
     os << "__float2bfloat16_rn";
-    os << '(' << std::hexfloat << op->value << 'f';
-    os << "/*" << std::scientific << op->value << "*/";
+    os << '(';
+    FloatImm value(PrimType::Float(32), op->value);
+    PrintConst(value.get(), os, p);
     os << ')';
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
   if (IsFloat8(op_ty) || IsFloat4(op_ty)) {
+    if (op_ty.MatchesCode(kDLFloat8_e5m2) && std::isinf(op->value)) {
+      os << "([]() { ";
+      p->PrintType(op_ty, os);
+      os << " value; value.__x = " << (std::signbit(op->value) ? 252 : 124)
+         << "; return value; })()";
+      return;
+    }
     p->PrintType(op_ty, os);
-    os << '(' << std::hexfloat << op->value << 'f';
-    os << "/*" << std::scientific << op->value << "*/";
+    os << '(';
+    FloatImm value(PrimType::Float(32), op->value);
+    PrintConst(value.get(), os, p);
     os << ')';
     return;
   }
@@ -1569,6 +2085,17 @@ inline void PrintConst(const FloatImmNode* op, std::ostream& os, CodeGenCUDA* p)
 }
 
 void CodeGenCUDA::Dispatch_(const FloatImmNode* op, std::ostream& os) {  // NOLINT(*)
+  PrimType dtype = op->ty.as_or_throw<PrimType>();
+  if (IsCustomDType(dtype)) {
+    TVM_FFI_CHECK(CustomDTypeStorage(dtype).MatchesCode(kDLFloat), ValueError)
+        << "CUDA custom dtype has no numeric constant conversion: " << dtype;
+    PrintType(dtype, os);
+    os << '(';
+    FloatImm value(PrimType::Float(32), op->value);
+    PrintConst(value.get(), os, this);
+    os << ')';
+    return;
+  }
   PrintConst(op, os, this);
 }
 
@@ -1593,7 +2120,7 @@ void CodeGenCUDA::PrintVecElemLoadExpr(const PrimType& t, int i, const std::stri
                                        std::ostream& os) {
   int lanes = t.lanes();
   TVM_FFI_ICHECK_GT(lanes, 1);
-  if (t.bits() == 8 && (t.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt))) {
+  if (t.bits() == 8 && lanes != 32 && t.MatchesCode(kDLInt, kDLUInt)) {
     if (!(lanes == 2 || lanes == 3)) {
       if (i != 0) {
         os << "|";
@@ -1649,12 +2176,15 @@ void CodeGenCUDA::PrintVecElemLoadExpr(const PrimType& t, int i, const std::stri
 // USE_CUDA=ON; on USE_CUDA=OFF builds (or when TVM_TIRX_COMPILE_FORCE_FALLBACK is
 // set), it returns a `CUDAFallbackModuleObj` carrying the raw source for
 // later cross-compile.
+static ffi::Module CompileCUDASource(IRModule mod, Target target, std::string code);
+
 ffi::Module BuildCUDA(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenCUDA cg(target);
   cg.Init(output_ssa);
+  cg.ConfigureModule(mod);
 
-  ffi::Map<GlobalVar, Function> functions;
+  std::vector<std::pair<GlobalVar, Function>> functions;
   for (auto [gvar, base_func] : mod->functions) {
     TVM_FFI_ICHECK(base_func->IsInstance<FunctionNode>()) << "CodeGenCUDA: Can only take Function";
     auto function = base_func.as_or_throw<Function>();
@@ -1664,8 +2194,11 @@ ffi::Module BuildCUDA(IRModule mod, Target target) {
                    calling_conv == CallingConv::kDefault)
         << "CodeGenCUDA: expect calling_conv equals CallingConv::kDeviceKernelLaunch or "
            "CallingConv::kDefault";
-    functions.Set(gvar, function);
+    functions.emplace_back(gvar, function);
   }
+  std::sort(functions.begin(), functions.end(), [](const auto& left, const auto& right) {
+    return left.first->name_hint < right.first->name_hint;
+  });
 
   for (auto [gvar, function] : functions) {
     cg.DeclareFunction(gvar, function);
@@ -1676,10 +2209,19 @@ ffi::Module BuildCUDA(IRModule mod, Target target) {
 
   std::string code = cg.Finish();
 
-  if (auto f = ffi::Function::GetGlobal("tvm_callback_cuda_postproc")) {
+  auto postproc =
+      mod->GetAttr(tvm::codegen::attr::kPostproc).value_or("tvm_callback_cuda_postproc");
+  if (auto f = ffi::Function::GetGlobal(postproc)) {
     code = (*f)(code, target).cast<std::string>();
+  } else {
+    TVM_FFI_CHECK(!mod->GetAttr(tvm::codegen::attr::kPostproc), ValueError)
+        << "Unknown CUDA postprocessing callback " << postproc;
   }
 
+  return CompileCUDASource(std::move(mod), std::move(target), std::move(code));
+}
+
+static ffi::Module CompileCUDASource(IRModule mod, Target target, std::string code) {
   // Hand off raw CUDA source to the fallback-aware factory.  When the real
   // CUDA runtime is registered (USE_CUDA=ON and not forced-fallback) the
   // factory invokes tvm_callback_cuda_compile and
@@ -1695,6 +2237,26 @@ ffi::Module BuildCUDA(IRModule mod, Target target) {
     config = resolved[1].cast<ffi::String>();
   }
   source_map.Set("backend_config", config.value());
+  if (mod->GetAttr(tvm::codegen::attr::kSourceOnly).value_or(false)) {
+    return ::tvm::target::CUDAFallbackModuleCreate(ffi::Bytes(code.data(), code.size()),
+                                                   ffi::String("cuda"), ExtractFuncInfo(mod),
+                                                   source_map);
+  }
+  if (auto compile = mod->GetAttr(tvm::codegen::attr::kCompile)) {
+    auto compiled = ffi::Function::GetGlobalRequired(*compile)(
+                        code, target, tvm::transform::PassContext::Current()->config)
+                        .cast<ffi::Array<ffi::Any>>();
+    TVM_FFI_CHECK_EQ(compiled.size(), 2, ValueError)
+        << "Codegen compile callbacks must return [bytes, format]";
+    auto binary = compiled[0].cast<ffi::Bytes>();
+    auto format = compiled[1].cast<ffi::String>();
+    TVM_FFI_CHECK(format == "ptx" || format == "cubin" || format == "fatbin" || format == "cuda",
+                  ValueError)
+        << "Unsupported CUDA compilation output format " << format;
+    source_map.Set("cuda", code);
+    return ::tvm::target::CUDAModuleCreateWithFallback(binary, format, ExtractFuncInfo(mod),
+                                                       source_map);
+  }
   return ::tvm::target::CUDAModuleCreateWithFallback(
       ffi::Bytes(code.data(), code.size()), ffi::String("cuda"), ExtractFuncInfo(mod), source_map);
 }
@@ -1705,7 +2267,9 @@ void RegisterCudaCodegen() {
   registered = true;
 
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("target.build.cuda", BuildCUDA);
+  refl::GlobalDef()
+      .def("target.build.cuda", BuildCUDA)
+      .def("target.build.cuda_from_source", CompileCUDASource);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() { RegisterCudaCodegen(); }

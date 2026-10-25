@@ -60,6 +60,7 @@ const Op& call_extern_op() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.call_extern")
+      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
       .signature(sig::arg("func_name", "The function name."), sig::var_args("args"))
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque);
 }
@@ -71,6 +72,7 @@ const Op& call_pure_extern_op() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.call_pure_extern")
+      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
       .signature(sig::arg("func_name", "The function name."), sig::var_args("args"))
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure);
 }
@@ -258,6 +260,21 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 const Op& call_cpacked_lowered_op() {
   static const Op op = Op::Get("tirx.call_cpacked_lowered");
   return op;
+}
+
+const Op& call_packed_with_result_op() {
+  static const Op op = Op::Get("tirx.call_packed_with_result");
+  return op;
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  OpDef("tirx.call_packed_with_result")
+      .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Int(32))
+      .signature(sig::arg("func_name", "The function name."),
+                 sig::arg("args_stack", "The argument stack."),
+                 sig::arg<IntExpr>("num_args", "The number of arguments."),
+                 sig::arg("result", "The initialized result slot."))
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

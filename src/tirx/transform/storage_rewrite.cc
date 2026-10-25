@@ -504,8 +504,11 @@ class StoragePlanRewriter : public StmtExprMutator {
   using AllocEntry = LinearAccessPatternFinder::AllocEntry;
 
   Stmt Rewrite(Stmt stmt, const ffi::Array<Var>& params, bool detect_inplace, bool enable_reuse,
-               bool reuse_require_exact_matched_dtype) {
+               bool reuse_require_exact_matched_dtype, bool preserve_shared_allocations,
+               bool allow_local_inplace) {
     detect_inplace_ = detect_inplace;
+    preserve_shared_allocations_ = preserve_shared_allocations;
+    allow_local_inplace_ = allow_local_inplace && detect_inplace;
     // plan the rewrite
     auto finder = ffi::make_object<LinearAccessPatternFinder>(params);
     finder->Visit(stmt);
@@ -609,6 +612,25 @@ class StoragePlanRewriter : public StmtExprMutator {
                           : TensorLoad(op->source.as_or_throw<TensorVar>(),
                                        std::move(indices).ValueUnchecked(), op->loc);
     return VisitTensorAccess(std::move(node));
+  }
+
+  UnchangedOr<Expr> Mutate_(const TensorRegionNode* op, InplaceMode inplace_mode) final {
+    auto tensor = op->source.as<TensorVar>();
+    if (!tensor) return StmtExprMutator::Mutate_(op, inplace_mode);
+    auto ranges = Mutate(op->region, inplace_mode)
+                      .as_or_throw<UnchangedOr<ffi::Array<Range>>>()
+                      .ValueOrUnchanged(op->region);
+    const VarNode* root = tensor_aliases_.Get(*tensor).value_or(*tensor).get();
+    auto entry = alloc_map_.find(root);
+    if (entry == alloc_map_.end()) {
+      return TensorRegion(*tensor, ranges, op->ty, op->loc);
+    }
+    TVM_FFI_CHECK(!ranges.empty(), ValueError) << "Storage regions must have a memory axis";
+    TensorVar remapped = RemapTensor(*tensor, entry->second->alloc_var);
+    const Range& last = ranges.back();
+    PrimExpr begin = RemapIndex(tensor.value().dtype(), last->begin, entry->second);
+    ranges.Set(ranges.size() - 1, Range(begin, begin + last->extent));
+    return TensorRegion(remapped, ranges, op->ty, op->loc);
   }
 
   UnchangedOr<Expr> Mutate_(const VarNode* op, InplaceMode inplace_mode) final {
@@ -815,9 +837,14 @@ class StoragePlanRewriter : public StmtExprMutator {
     uint64_t packing_alignment_bits{32};
   };
 
-  static bool RequiresExactAllocation(const CallNode* call) {
+  bool RequiresExactAllocation(const CallNode* call) const {
     auto type = call->ty_args[0].as_or_throw<TensorType>();
-    if (GetMemoryAllocProperty(type->scope) == MemoryAllocProperty::kSeparateAllocations) {
+    if (preserve_shared_allocations_ &&
+        (type->scope.name() == "shared" || type->scope.name() == "shared.dyn")) {
+      return true;
+    }
+    if (GetMemoryAllocProperty(type->scope) == MemoryAllocProperty::kSeparateAllocations &&
+        !(allow_local_inplace_ && type->scope.name() == "local")) {
       return true;
     }
     // Flat packing and lifetime reuse cannot reconstruct arbitrary physical views.
@@ -826,6 +853,7 @@ class StoragePlanRewriter : public StmtExprMutator {
       return true;
     }
     if (!call->args.empty()) return true;
+    if (!call->attrs.has_value()) return false;
     const auto& annotations = call->attrs.value().as_or_throw<DictAttrs>()->dict;
     // Rebuilt allocations only preserve volatile metadata.  Other owners may attach
     // constraints that cannot be transferred to merged or resized storage.
@@ -1244,8 +1272,8 @@ class StoragePlanRewriter : public StmtExprMutator {
                           enable_reuse, reuse_require_exact_matched_dtype);
           }
           dst_entry->allocs.emplace_back(alloc);
-          DictAttrs annotations = call->attrs.value().as_or_throw<DictAttrs>();
-          if (annotations->dict.count(tvm::tirx::attr::kVolatile.name)) {
+          if (call->attrs.has_value() && call->attrs.value().as_or_throw<DictAttrs>()->dict.count(
+                                             tvm::tirx::attr::kVolatile.name)) {
             dst_entry->is_volatile = true;
           }
           alloc_map_[var] = dst_entry;
@@ -1327,6 +1355,7 @@ class StoragePlanRewriter : public StmtExprMutator {
                           is_known_size && const_nbits <= 32;
 
     if (RequiresExactAllocation(call) || is_scalable_vector || !enable_reuse || is_small_array ||
+        GetMemoryAllocProperty(scope) == MemoryAllocProperty::kSeparateAllocations ||
         !is_flat_memory_space ||
         (GetMemoryAllocProperty(scope) == MemoryAllocProperty::kSingleAllocation &&
          !is_known_size)) {
@@ -1408,6 +1437,8 @@ class StoragePlanRewriter : public StmtExprMutator {
   std::vector<const ffi::Object*> thread_scope_stack_;
   // whether enable inplace detection.
   bool detect_inplace_{false};
+  bool preserve_shared_allocations_{false};
+  bool allow_local_inplace_{false};
   // Locations of free ops.
   std::unordered_map<const ffi::Object*, EventEntry> event_map_;
   // constant size free map.
@@ -2270,17 +2301,18 @@ Function PointerValueTypeRewrite(Function f, bool allow_untyped_pointers = false
 
 namespace transform {
 
-Pass StorageRewrite() {
-  auto pass_func = [](Function f, IRModule m, PassContext ctx) {
+Pass StorageRewrite(bool enable_reuse, bool detect_inplace, bool preserve_shared_allocations,
+                    bool allow_local_inplace) {
+  auto pass_func = [=](Function f, IRModule m, PassContext ctx) {
     if (!f->body.has_value()) return f;
-    bool enable_reuse = true;
+    bool reuse = enable_reuse;
     bool reuse_require_exact_matched_dtype = false;
     bool merge_static_smem = ctx->GetConfig<bool>("tirx.merge_static_smem").value_or(false);
     if (merge_static_smem) {
       // When `merge_static_smem` is true, we will reuse and merge shared
       // memory in a dedicated pass `MergeSharedMemoryAllocations`.
       // And so we don't enable reuse in this pass.
-      enable_reuse = false;
+      reuse = false;
     }
 
     ffi::Optional<Target> target = f->GetAttr(tvm::attr::kTarget);
@@ -2290,9 +2322,9 @@ Pass StorageRewrite() {
       reuse_require_exact_matched_dtype = true;
     }
     auto* n = f.CopyOnWrite();
-    n->body = ffi::make_object<StoragePlanRewriter>()->Rewrite(std::move(n->body).value(),
-                                                               n->params, true, enable_reuse,
-                                                               reuse_require_exact_matched_dtype);
+    n->body = ffi::make_object<StoragePlanRewriter>()->Rewrite(
+        std::move(n->body).value(), n->params, detect_inplace, reuse,
+        reuse_require_exact_matched_dtype, preserve_shared_allocations, allow_local_inplace);
     // Parameters may not be rewritten, but internal allocations may.
     return PointerValueTypeRewrite(std::move(f), true, false, false, true, true, true, false);
   };

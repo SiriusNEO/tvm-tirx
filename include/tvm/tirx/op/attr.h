@@ -33,6 +33,7 @@
 #include <tvm/ffi/string.h>
 #include <tvm/ir/expr.h>
 #include <tvm/ir/stmt.h>
+#include <tvm/target/target.h>
 
 namespace tvm {
 namespace tirx {
@@ -47,6 +48,18 @@ using FLowerIntrinsic = ffi::TypedFunction<PrimExpr(PrimExpr)>;
  */
 using FLegalize = ffi::TypedFunction<PrimExpr(PrimExpr)>;
 
+/*!
+ * \brief Vectorize a dialect call within a zero-based vector loop.
+ *
+ * The callback receives the original call, lane variable, lane count, an operand
+ * rewriter, and the optional function target. Return nullopt when the enclosing
+ * statement must execute separately for each lane. The operand rewriter is valid
+ * only during this callback and must not be applied to the original call itself.
+ * Implementations own operand selection, result typing, and preservation of effects.
+ */
+using FVectorizeCall = ffi::TypedFunction<ffi::Optional<Expr>(
+    Call, PrimVar, PrimExpr, ffi::TypedFunction<Expr(Expr)>, ffi::Optional<Target>)>;
+
 namespace op_attr {
 /*!
  * \brief Global symbol of the op after lowering.
@@ -56,6 +69,8 @@ inline constexpr ffi::reflection::AttrKey<ffi::String> kGlobalSymbol{"TGlobalSym
  * \brief Whether the op is overloaded for vector form.
  */
 inline constexpr ffi::reflection::AttrKey<bool> kVectorizable{"TVectorizable"};
+/*! \brief Optional dialect-specific vectorization rule, before generic operand rewriting. */
+inline constexpr ffi::reflection::AttrKey<FVectorizeCall> kVectorizeCall{"FVectorizeCall"};
 }  // namespace op_attr
 
 }  // namespace tirx

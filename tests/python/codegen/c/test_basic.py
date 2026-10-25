@@ -16,12 +16,162 @@
 # under the License.
 
 import numpy as np
+import pytest
 
 import tvm_tirx
 import tvm_tirx.testing
 from tvm_tirx.script import ir as I
 from tvm_tirx.script import tirx as T
 from tvm_tirx.support import utils
+
+
+@pytest.mark.parametrize("backend", ["c", "llvm"])
+def test_native_unit_return_is_void_and_preserves_early_exit(backend):
+    import tvm_ffi
+    from tvm_tirx import ir, runtime, target, tirx
+
+    if backend == "llvm" and not runtime.enabled(backend):
+        pytest.skip("LLVM is not enabled")
+    output = ir.Var("output", tirx.TensorType((1,), "int32"))
+    flag = ir.Var("flag", "int32")
+    body = [
+        ir.If(flag > 0, ir.Return(ir.Tuple([])), None),
+        ir.TensorStore(output, [0], ir.const(9)),
+        ir.Return(ir.Tuple([])),
+    ]
+    function = tirx.Function([output, flag], body, ret_type=ir.TupleType([]))
+    function = function.with_attr("global_symbol", "unit_return")
+    source_function = tirx.Function([flag], [body[0], body[-1]], ret_type=ir.TupleType([]))
+    source_function = source_function.with_attr("global_symbol", "unit_return")
+    source = tvm_ffi.get_global_func("target.build.c")(
+        ir.IRModule({"unit_return": source_function}), target.Target("c")
+    ).inspect_source()
+    assert source.count("return;") == 2
+    executable = tirx.compile(function, target=backend)
+    for skip in (0, 1):
+        actual = runtime.tensor(np.array([-1], dtype="int32"))
+        assert executable(actual, skip) is None
+        np.testing.assert_array_equal(actual.numpy(), [-1 if skip else 9])
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_floating_constants_preserve_special_values_and_precision(dtype):
+    from tvm_tirx import ir, runtime, tirx
+
+    values = np.array(
+        [np.inf, -np.inf, np.nan, 0.0, -0.0, np.pi, np.finfo(dtype).tiny, np.finfo(dtype).max],
+        dtype=dtype,
+    )
+    output = ir.Var("output", tirx.TensorType((len(values),), dtype))
+    body = ir.SeqStmt(
+        [
+            ir.TensorStore(output, [index], ir.const(float(value), dtype))
+            for index, value in enumerate(values)
+        ]
+    )
+    function = tirx.Function([output], body, ret_type=ir.TupleType([]))
+    function = function.with_attr("global_symbol", "floating_constants")
+    executable = tirx.compile(function, target="c")
+    actual = runtime.empty((len(values),), dtype)
+    executable(actual)
+    result = actual.numpy()
+    np.testing.assert_array_equal(result, values)
+    np.testing.assert_array_equal(np.signbit(result[3:5]), np.signbit(values[3:5]))
+
+
+@pytest.mark.parametrize("target", ["c", "llvm"])
+def test_dynamic_loop_step_respects_direction(target):
+    from tvm_tirx import ir, runtime, tirx
+
+    if target == "llvm" and not runtime.enabled(target):
+        pytest.skip("LLVM is not enabled")
+    begin = ir.Var("begin", "int32")
+    end = ir.Var("end", "int32")
+    step = ir.Var("step", "int32")
+    index = ir.Var("index", "int32")
+    output = ir.Var("output", tirx.TensorType([16], "int32"))
+    body = ir.For(
+        index, begin, end, step, ir.ForKind.DEFAULT, ir.TensorStore(output, [index], index + 1)
+    )
+    function = tirx.Function([output, begin, end, step], body, ret_type=ir.TupleType([]))
+    executable = tirx.compile(function.with_attr("global_symbol", "dynamic_loop"), target=target)
+    for first, last, increment in [(1, 11, 3), (9, -1, -3), (3, 7, -1), (8, 2, 1)]:
+        actual = runtime.tensor(np.full(16, -99, dtype="int32"))
+        executable(actual, first, last, increment)
+        expected = np.full(16, -99, dtype="int32")
+        for iteration in range(first, last, increment):
+            expected[iteration] = iteration + 1
+        np.testing.assert_array_equal(actual.numpy(), expected)
+
+
+@pytest.mark.parametrize("target", ["c", "llvm"])
+def test_allocation_without_optional_attributes(target):
+    from tvm_tirx import ir, runtime, tirx
+
+    if target == "llvm" and not runtime.enabled(target):
+        pytest.skip(f"{target} is not enabled")
+    output = ir.Var("output", tirx.TensorType((4,), "float32"))
+    local_type = tirx.TensorType((4,), "float32", scope="local")
+    temporary = ir.Var("temporary", local_type)
+    allocation = ir.Bind(temporary, ir.Call("tirx.alloc_tensor", [], ty_args=[local_type]))
+    initialize = [
+        ir.TensorStore(temporary, [index], ir.const(index + 0.5, "float32")) for index in range(4)
+    ]
+    copy = [
+        ir.TensorStore(output, [index], ir.TensorLoad(temporary, [index])) for index in range(4)
+    ]
+    body = ir.SeqStmt([allocation, *initialize, *copy])
+    function = tirx.Function([output], body, ret_type=ir.TupleType([]))
+    function = function.with_attr("global_symbol", "allocation_without_attributes")
+    executable = tirx.compile(function, target=target)
+    actual = runtime.empty((4,), "float32")
+    executable(actual)
+    np.testing.assert_array_equal(actual.numpy(), np.arange(4, dtype="float32") + 0.5)
+
+
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+def test_host_pointers_do_not_require_device_scalar_types(dtype):
+    from tvm_tirx import ir, runtime, tirx
+
+    source = ir.Var("source", tirx.TensorType((4,), dtype))
+    output = ir.Var("output", tirx.TensorType((1,), "uint64"))
+    first = ir.Call("tirx.address_of", [ir.TensorLoad(source, [0])])
+    second = ir.Call("tirx.address_of", [ir.TensorLoad(source, [1])])
+    first_address = ir.Call("tirx.reinterpret", [first], ty="uint64")
+    second_address = ir.Call("tirx.reinterpret", [second], ty="uint64")
+    body = ir.TensorStore(output, [0], second_address - first_address)
+    function = tirx.Function([source, output], body, ret_type=ir.TupleType([]))
+    function = function.with_attr("global_symbol", "host_pointer_storage")
+    executable = tirx.compile(function, target="c")
+    actual = runtime.empty((1,), "uint64")
+    executable(runtime.empty((4,), dtype), actual)
+    np.testing.assert_array_equal(actual.numpy(), [2])
+
+
+@pytest.mark.parametrize("output_dtype", ["float16", "float32"])
+def test_float16_loads_and_stores_use_numeric_values(output_dtype):
+    from tvm_tirx import ir, runtime, tirx
+    from tvm_tirx.ir import prim
+
+    values = np.array([-3.5, -0.25, 0.0, 0.5, 17.0, np.finfo("float16").tiny], dtype="float16")
+    source = ir.Var("source", tirx.TensorType((len(values),), "float16"))
+    output = ir.Var("output", tirx.TensorType((len(values),), output_dtype))
+    body = ir.SeqStmt(
+        [
+            ir.TensorStore(
+                output,
+                [index],
+                prim.Cast(output_dtype, ir.TensorLoad(source, [index])) * ir.const(2, output_dtype),
+            )
+            for index in range(len(values))
+        ]
+    )
+    function = tirx.Function([source, output], body, ret_type=ir.TupleType([]))
+    function = function.with_attr("global_symbol", "numeric_half_storage")
+    executable = tirx.compile(function, target="c")
+    actual = runtime.empty((len(values),), output_dtype)
+    executable(runtime.tensor(values), actual)
+    np.testing.assert_array_equal(actual.numpy(), values.astype(output_dtype) * 2)
 
 
 def test_add():

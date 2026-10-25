@@ -30,6 +30,9 @@
 namespace tvm {
 namespace tirx {
 
+/*! \brief A sequential lexical scope with no operands, parameters, attrs, or results. */
+TVM_TIRX_DLL const Op& scope_op();
+
 /*!
  * \brief Thread launch region: operands are a nonempty StringImm tag and a
  * scalar signed or unsigned integer extent wider than one bit.

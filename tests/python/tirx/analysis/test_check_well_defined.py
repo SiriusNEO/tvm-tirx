@@ -339,10 +339,12 @@ def test_tensor_load_asserted_type_matches_source_and_indices():
 
     graph = json.loads(serialized)
     load = next(node for node in graph["nodes"] if node["type"] == "ir.TensorLoad")
+    primitive_graph = json.loads(tvm_tirx.ir.save_json(tvm_tirx.ir.PrimType("int32")))
+    primitive_data = primitive_graph["nodes"][primitive_graph["root_index"]]["data"]
     int32_type_index = next(
         index
         for index, node in enumerate(graph["nodes"])
-        if node["type"] == "ir.PrimType" and node["data"]["dtype"] == "int32"
+        if node["type"] == "ir.PrimType" and node["data"] == primitive_data
     )
     load["data"]["ty"] = int32_type_index
     malformed = tvm_tirx.ir.load_json(json.dumps(graph))

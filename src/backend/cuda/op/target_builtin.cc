@@ -219,7 +219,7 @@ void RegisterDeviceIntrinsics() {
       .set_native_fn_attr<&InferTypeReturnArgType<0>>(tvm::op_attr::kInferType);
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.cta_sync"), CallEffectKind::kOpaque)
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void());
-  RegisterDeviceIntrinsic(OpDef("tirx.cuda.cvta_generic_to_shared"), CallEffectKind::kOpaque,
+  RegisterDeviceIntrinsic(OpDef("tirx.cuda.cvta_generic_to_shared"), CallEffectKind::kPure,
                           sig::arg("ptr"))
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::UInt(32));
   RegisterDeviceIntrinsic(OpDef("tirx.cuda.elect_sync"), CallEffectKind::kOpaque)

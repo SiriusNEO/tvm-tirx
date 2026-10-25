@@ -23,8 +23,13 @@ function(tvm_tirx_configure_target target)
   set_property(TARGET ${target} PROPERTY CUDA_STANDARD 20)
   set_property(TARGET ${target} PROPERTY CUDA_STANDARD_REQUIRED ON)
   set_property(TARGET ${target} PROPERTY CXX_EXTENSIONS OFF)
-  set_property(TARGET ${target} PROPERTY CXX_VISIBILITY_PRESET hidden)
-  set_property(TARGET ${target} PROPERTY VISIBILITY_INLINES_HIDDEN ON)
+  if(TVM_TIRX_EXPORT_ALL_SYMBOLS)
+    set_target_properties(${target} PROPERTIES
+      CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF)
+  else()
+    set_target_properties(${target} PROPERTIES
+      CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+  endif()
 
   # Keep shared libraries relocatable within their installation directory.
   if(APPLE)

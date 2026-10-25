@@ -48,16 +48,37 @@ void ValidateBuiltinRegion(const RegionStmtNode* region) {
       << region->op->name << " expects no results or attributes";
 }
 
+const Op& scope_op() {
+  static const Op op = Op::Get("tirx.scope");
+  return op;
+}
+
+void ValidateScopeRegion(const RegionStmtNode* region) {
+  TVM_FFI_CHECK(region->result_vars.empty(), ValueError) << "tirx.scope expects no results";
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  OpDef("tirx.scope", "Execute a sequential body with a lexical allocation boundary.")
+      .signature()
+      .set_native_fn_attr<&RegionNoBodyParams>(tvm::op_attr::kRegionGetBodyParams)
+      .set_native_fn_attr<&ValidateScopeRegion>(tvm::op_attr::kRegionValidate);
+}
+
 const Op& launch_thread_op() {
   static const Op op = Op::Get("tirx.launch_thread");
   return op;
 }
 
+void ValidateLaunchThreadRegion(const RegionStmtNode* region) {
+  TVM_FFI_CHECK(region->result_vars.empty(), ValueError) << "tirx.launch_thread expects no results";
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.launch_thread", "Bind a thread index within a body with a launch extent.")
-      .signature(sig::arg<StringImm>("tag"), sig::arg<IntExpr>("extent"))
+      .signature(sig::arg<StringImm>("tag"), sig::arg<IntExpr>("extent"),
+                 sig::call_attrs<DictAttrsNode>())
       .set_native_fn_attr<&LaunchThreadBodyParams>(tvm::op_attr::kRegionGetBodyParams)
-      .set_native_fn_attr<&ValidateBuiltinRegion>(tvm::op_attr::kRegionValidate);
+      .set_native_fn_attr<&ValidateLaunchThreadRegion>(tvm::op_attr::kRegionValidate);
 }
 
 void ValidateDeviceScopeRegion(const RegionStmtNode* region) {

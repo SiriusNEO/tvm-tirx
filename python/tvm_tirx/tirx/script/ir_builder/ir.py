@@ -20,7 +20,7 @@ import contextlib
 import functools
 import inspect
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import tvm_ffi
@@ -1009,8 +1009,8 @@ def ptr(dtype: str, storage_scope: str | MemoryScope = _SCOPE_GLOBAL) -> Var:
 def index_map(
     mapping: Callable,
     *,
-    inverse_index_map: Callable | None = None,
-    index_dtype: str = "int64",
+    inverse_index_map: Callable | IndexMap | None = None,
+    index_dtype: str | Sequence[str] = "int64",
 ) -> IndexMap:
     """Create a TIR Index mapping"""
     return IndexMap.from_func(mapping, inverse_index_map=inverse_index_map, index_dtype=index_dtype)

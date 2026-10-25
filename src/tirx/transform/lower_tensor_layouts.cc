@@ -23,6 +23,7 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/analysis.h>
 #include <tvm/ir/function.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
@@ -67,7 +68,16 @@ class LayoutApplier : public StmtExprMutatorWithAnalyzer {
       storage_lower->tensor_aliases_.Set(tensor.value(), tensor.value());
       TensorVar flattened = storage_lower->GetFlattenedTensor(tensor.value());
       TensorVar source = tensor.value();
-      if (source.ty()->layout.has_value() && source.ty()->HasDefaultLayout(ana)) {
+      std::unordered_set<const VarNode*> shape_variables;
+      for (const PrimExpr& extent : source.shape()) {
+        for (const Var& variable : tvm::UndefinedVars(extent))
+          shape_variables.insert(variable.get());
+      }
+      bool preserves_metadata = true;
+      for (const Var& variable : tvm::UndefinedVars(source.ty()))
+        preserves_metadata &= shape_variables.count(variable.get()) != 0;
+      if (source.ty()->layout.has_value() && source.ty()->HasDefaultLayout(ana) &&
+          preserves_metadata) {
         auto type = ffi::make_object<TensorTypeNode>(*source.ty().get());
         type->layout = std::nullopt;
         source = TensorVar(source->name, TensorType(std::move(type)), source->loc);
@@ -91,6 +101,14 @@ class LayoutApplier : public StmtExprMutatorWithAnalyzer {
       : StmtExprMutatorWithAnalyzer(analyzer) {}
 
  protected:
+  UnchangedOr<Stmt> Mutate_(const ForNode* op, InplaceMode inplace_mode) final {
+    if (analyzer_->CanProve((op->step > 0 && op->begin >= op->end) ||
+                            (op->step < 0 && op->begin <= op->end))) {
+      return SeqStmt({}, op->loc);
+    }
+    return StmtExprMutatorWithAnalyzer::Mutate_(op, inplace_mode);
+  }
+
   ffi::Any VisitAny(const ffi::Any& any) {
     if (any == nullptr) {
       return any;
@@ -297,6 +315,18 @@ class LayoutApplier : public StmtExprMutatorWithAnalyzer {
       load.CopyOnWrite()->indices = std::move(indices).ValueUnchecked();
     }
     return VisitTensorAccess(std::move(load));
+  }
+
+  UnchangedOr<Expr> Mutate_(const TensorRegionNode* op, InplaceMode inplace_mode) final {
+    TensorVar tensor = op->source.as_or_throw<TensorVar>();
+    auto regions = Mutate(op->region, inplace_mode)
+                       .as_or_throw<UnchangedOr<ffi::Array<Range>>>()
+                       .ValueOrUnchanged(op->region);
+    auto flattened_regions = MapTensorRegionBounds(
+        regions, ffi::GetRef<sym::Analyzer>(analyzer_), [&](const ffi::Array<PrimExpr>& indices) {
+          return GetSimplifiedElemOffset(tensor, indices);
+        });
+    return TensorRegion(GetFlattenedTensor(tensor), std::move(flattened_regions), op->ty, op->loc);
   }
 
   ffi::Array<PrimExpr> GetSimplifiedElemOffset(const TensorVar& tensor,

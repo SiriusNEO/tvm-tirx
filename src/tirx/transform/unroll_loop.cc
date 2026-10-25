@@ -298,7 +298,7 @@ class LoopUnroller : public StmtExprMutator {
       return ffi::Unchanged();
     };
     for (int i = 0; i < value; ++i) {
-      vmap.Set(op->var, op->begin + IntImm(op->var.ty(), i));
+      vmap.Set(op->var, op->begin + IntImm(op->var.ty(), i) * op->step);
       Stmt step =
           ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(body, f_substitute).as_or_throw<Stmt>();
       unrolled.push_back(step);
@@ -311,14 +311,13 @@ class LoopUnroller : public StmtExprMutator {
   int GetExtent(const ForNode* op) {
     // constant folding.
     PrimExpr extent = analyzer_->Simplify(Range::GetExtentFromBeginEnd(op->begin, op->end));
-    const IntImmNode* v1 = extent.as<IntImmNode>();
-    int value = -1;
-    // integers that do not fit in int32_t are treated as symbolic,
-    // as it's impossible to unroll such large loops
-    if (v1 != nullptr) {
-      value = v1->value.as<int>().value_or(-1);
-    }
-    return value;
+    PrimExpr step = analyzer_->Simplify(op->step);
+    const auto* extent_constant = extent.as<IntImmNode>();
+    const auto* step_constant = step.as<IntImmNode>();
+    if (!extent_constant || !step_constant || step_constant->value <= 0) return -1;
+    if (extent_constant->value <= 0) return 0;
+    ffi::BigInt count = (extent_constant->value + step_constant->value - 1) / step_constant->value;
+    return count.as<int>().value_or(-1);
   }
 
   struct UnrollPolicy {

@@ -36,6 +36,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -116,10 +117,16 @@ class TVMFFIABIBuilder {
    * \param v_num_packed_args The variable holding the actual number of packed args.
    * \param device_type The expected device type expression.
    * \param device_id The device id variable (may be defined during tensor binding).
+   * \param storage_dtypes Physical tensor element types for packed innermost-axis storage.
+   * \param nullable_parameters Tensor parameters with no data uses in the function.
+   * \param required_metadata Live metadata variables that require a provider when shared.
    */
   TVMFFIABIBuilder(const ffi::String& func_name, const ffi::Array<Var>& params,
                    const Var& v_packed_args, const Var& v_num_packed_args,
-                   const PrimExpr& device_type, const PrimExpr& device_id);
+                   const PrimExpr& device_type, const PrimExpr& device_id,
+                   const ffi::Map<Var, PrimType>& storage_dtypes = {},
+                   const ffi::Array<Var>& nullable_parameters = {},
+                   const ffi::Array<Var>& required_metadata = {});
 
   /*!
    * \brief Decode all packed arguments: type-check, load values, bind tensors.
@@ -169,7 +176,7 @@ class TVMFFIABIBuilder {
   void EmitAssert(const PrimExpr& cond, const char* error_kind, Args&&... args) {
     ffi::Array<StringImm> parts;
     (parts.push_back(ToMsgPart(std::forward<Args>(args))), ...);
-    init_nest_.emplace_back(AssertStmt(cond, StringImm(error_kind), parts));
+    init_nest_.emplace_back(AssertStmt(GuardCondition(cond), StringImm(error_kind), parts));
   }
 
   // ── Binding submethods ─────────────────────────────────────────
@@ -357,6 +364,11 @@ class TVMFFIABIBuilder {
    */
   void RenderPendingAsserts();
 
+  int StoragePackingFactor(const TensorVar& tensor) const;
+  PrimExpr GuardCondition(const PrimExpr& condition) const;
+  Expr GuardValue(const Expr& value) const;
+  void BindNullableMetadata();
+
   // ── Data members ───────────────────────────────────────────────
 
   /*! \brief Pending constant-expression assertion: deferred until Finalize() for display-var
@@ -377,7 +389,21 @@ class TVMFFIABIBuilder {
     ffi::reflection::AccessPath path;
     /*! \brief Whether equality still needs checking after linear inference. */
     bool needs_check{true};
+    PrimExpr guard{IntImm::Bool(true)};
   };
+
+  struct PendingScalarBinding {
+    PrimExpr argument;
+    PrimExpr value;
+    ffi::reflection::AccessPath path;
+    PrimExpr guard;
+  };
+
+  std::vector<PendingScalarBinding> pending_scalar_bindings_;
+  std::unordered_set<const VarNode*> nullable_parameters_;
+  std::unordered_set<const VarNode*> required_metadata_;
+  PrimExpr current_guard_{IntImm::Bool(true)};
+  bool defer_scalar_bindings_{false};
 
   /*! \brief Non-variable shapes, processed after all bare dimensions have been bound. */
   std::vector<PendingIntExpr> pending_int_exprs_;
@@ -403,6 +429,7 @@ class TVMFFIABIBuilder {
   std::string func_signature_;
   /*! \brief The function parameters. */
   ffi::Array<Var> params_;
+  ffi::Map<Var, PrimType> storage_dtypes_;
   /*! \brief Raw packed-ABI handles decoded for tensor-typed parameters. */
   std::unordered_map<const VarNode*, Var> tensor_handles_;
   /*! \brief The packed args variable. */

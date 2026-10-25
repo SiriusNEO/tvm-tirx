@@ -216,6 +216,7 @@ class CUDAWrappedFunc {
     TVM_FFI_CHECK_CUDA_ERROR(cudaGetDevice(&device_id));
     TVM_FFI_CHECK_GE(device_id, 0, ValueError);
     TVM_FFI_CHECK_LT(device_id, kMaxNumGPUs, ValueError);
+    TVM_FFI_CHECK_CUDA_ERROR(cudaSetDevice(device_id));
     auto& device = (*devices_)[device_id];
     CUfunction function;
     {

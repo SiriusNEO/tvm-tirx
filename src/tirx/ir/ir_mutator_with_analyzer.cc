@@ -52,6 +52,29 @@ using namespace tvm::prim;
 
 using sym::detail::EnterConstraintFacts;
 
+UnchangedOr<Stmt> StmtExprMutatorWithAnalyzer::Mutate_(const SeqStmtNode* op,
+                                                       InplaceMode inplace_mode) {
+  return constraint_scope_.WithNewScope([&]() -> UnchangedOr<Stmt> {
+    ffi::Array<Stmt> statements;
+    bool changed = false;
+    for (const Stmt& statement : op->seq) {
+      Stmt rewritten = Mutate(statement, inplace_mode).ValueOrUnchanged(statement);
+      changed |= !rewritten.same_as(statement);
+      statements.push_back(rewritten);
+      const auto* evaluate = rewritten.as<EvaluateNode>();
+      const auto* call = evaluate ? evaluate->value.as<CallNode>() : nullptr;
+      if (call && call->op.same_as(prim::assume_op())) {
+        PrimExpr condition = call->args[0].as_or_throw<PrimExpr>();
+        if (SideEffect(condition) == CallEffectKind::kPure) {
+          constraint_scope_.Current().Emplace(analyzer_, condition, true);
+        }
+      }
+    }
+    if (!changed) return ffi::Unchanged();
+    return SeqStmt(statements, op->loc);
+  });
+}
+
 void StmtExprMutatorWithAnalyzer::MarkTensorParamShapes(const tirx::Function& func) {
   // Mark all symbolic tensor-parameter shape values as positive.
   for (const tvm::Var& param : func->params) {
@@ -89,9 +112,6 @@ UnchangedOr<Stmt> StmtExprMutatorWithAnalyzer::Mutate_(const ForNode* op,
                                                        InplaceMode inplace_mode) {
   return constraint_scope_.WithNewScope([&]() -> UnchangedOr<Stmt> {
     // record the loop variable as iterators
-    Range dom = Range(op->begin, op->end);
-    analyzer_->Bind(op->var, dom);
-    iter_vars_.Set(op->var, dom);
     auto begin_result = this->Mutate(op->begin, inplace_mode);
     bool begin_unchanged = begin_result.UnchangedOrSameAs(op->begin);
     PrimExpr begin = std::move(begin_result).ValueOrUnchanged(op->begin);
@@ -99,14 +119,32 @@ UnchangedOr<Stmt> StmtExprMutatorWithAnalyzer::Mutate_(const ForNode* op,
     bool end_unchanged = end_result.UnchangedOrSameAs(op->end);
     PrimExpr end = std::move(end_result).ValueOrUnchanged(op->end);
     PrimExpr step = this->Mutate(op->step, inplace_mode).ValueOrUnchanged(op->step);
+    ffi::Optional<Range> domain;
+    if (SideEffect(begin) == CallEffectKind::kPure && SideEffect(end) == CallEffectKind::kPure &&
+        SideEffect(step) == CallEffectKind::kPure) {
+      if (analyzer_->CanProve(step > 0)) domain = Range(begin, end);
+    }
+    if (domain) {
+      analyzer_->Bind(op->var, domain.value());
+      iter_vars_.Set(op->var, domain.value());
+    }
+    auto annotations = this->Mutate(op->annotations, inplace_mode)
+                           .as_or_throw<UnchangedOr<decltype(op->annotations)>>();
     Stmt body = constraint_scope_.WithNewScope([&]() -> Stmt {
-      EnterConstraintFacts(&constraint_scope_.Current(), analyzer_, end > begin);
-      PrimExpr extent = Range::GetExtentFromBeginEnd(begin, end);
-      EnterConstraintFacts(&constraint_scope_.Current(), analyzer_,
-                           extent > IntImm(extent.ty(), 0));
+      if (analyzer_->CanProve(step > 0)) {
+        EnterConstraintFacts(&constraint_scope_.Current(), analyzer_, end > begin);
+        EnterConstraintFacts(&constraint_scope_.Current(), analyzer_, end - begin > 0);
+      } else if (analyzer_->CanProve(step < 0)) {
+        EnterConstraintFacts(&constraint_scope_.Current(), analyzer_, begin > end);
+        EnterConstraintFacts(&constraint_scope_.Current(), analyzer_, begin - end > 0);
+      }
+      PrimExpr inside = (step > 0 && op->var >= begin && op->var < end) ||
+                        (step < 0 && op->var <= begin && op->var > end);
+      EnterConstraintFacts(&constraint_scope_.Current(), analyzer_, inside);
       return this->Mutate(op->body, inplace_mode).ValueOrUnchanged(op->body);
     });
-    if (begin_unchanged && end_unchanged && body.same_as(op->body) && step.same_as(op->step)) {
+    if (begin_unchanged && end_unchanged && body.same_as(op->body) && step.same_as(op->step) &&
+        annotations.UnchangedOrSameAs(op->annotations)) {
       return ffi::Unchanged();
     } else {
       if (inplace_mode == InplaceMode::kAllow) {
@@ -115,6 +153,7 @@ UnchangedOr<Stmt> StmtExprMutatorWithAnalyzer::Mutate_(const ForNode* op,
         n->end = std::move(end);
         n->step = std::move(step);
         n->body = std::move(body);
+        n->annotations = std::move(annotations).ValueOrUnchanged(op->annotations);
         return ffi::Unchanged();
       }
       auto n = ffi::make_object<ForNode>(*op);
@@ -122,6 +161,7 @@ UnchangedOr<Stmt> StmtExprMutatorWithAnalyzer::Mutate_(const ForNode* op,
       n->end = std::move(end);
       n->step = std::move(step);
       n->body = std::move(body);
+      n->annotations = std::move(annotations).ValueOrUnchanged(op->annotations);
       return Stmt(n);
     }
   });

@@ -139,7 +139,7 @@ def native_fields():
         "  void SetHandle(Field field, void* value) { Value v; v.handle = value; Set(field, v); }",
         "};",
         "inline void NormalizeLegacyPresence(LaunchValues* values) {",
-        "  for (size_t i = 0; i < static_cast<size_t>(Field::kDynamicSmemBytes); ++i)",
+        "  for (size_t i = static_cast<size_t>(Field::kClusterX); i < static_cast<size_t>(Field::kDynamicSmemBytes); ++i)",
         "    if (values->values[i].integer == 0) values->values[i].integer = 1;",
         "  if (values->Int(Field::kPreferredClusterX) == 1 && values->Int(Field::kPreferredClusterY) == 1 && values->Int(Field::kPreferredClusterZ) == 1)",
         "    values->present[static_cast<size_t>(Option::kPreferredCluster)] = false;",

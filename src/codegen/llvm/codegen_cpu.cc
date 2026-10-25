@@ -1013,6 +1013,18 @@ llvm::Value* CodeGenCPU::CreateIntrinsic(const CallNode* op) {
   const ffi::Array<Expr>& args = op->args;
   if (op->op.same_as(tirx::call_packed_lowered_op())) {
     return CreateCallPacked(op);
+  } else if (op->op.same_as(tirx::call_packed_with_result_op())) {
+    TVM_FFI_ICHECK_EQ(args.size(), 4U);
+    const auto* name = args[0].as<StringImmNode>();
+    TVM_FFI_ICHECK(name);
+    llvm::Value* handle = GetPackedFuncHandle(name->value);
+    llvm::Value* packed =
+        builder_->CreatePointerCast(MakeValue(args[1]), llvmGetPointerTo(t_tvm_ffi_any_, 0));
+    llvm::Value* result =
+        builder_->CreatePointerCast(MakeValue(args[3]), llvmGetPointerTo(t_tvm_ffi_any_, 0));
+    return builder_->CreateCall(
+        llvm::FunctionCallee(ftype_tvm_ffi_func_call_, RuntimeTVMFFIFunctionCall()),
+        {handle, packed, MakeValue(args[2]), result});
   } else if (op->op.same_as(tirx::call_cpacked_lowered_op())) {
     return CreateCallPacked(op);
   } else if (op->op.same_as(tirx::cpu_parallel_barrier_op())) {

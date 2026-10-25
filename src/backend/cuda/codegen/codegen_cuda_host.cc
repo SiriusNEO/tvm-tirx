@@ -51,6 +51,8 @@ class CodeGenCUDAHost : public CodeGenCHost {
 
   void Init(Target target) {
     CodeGenCHost::Init(false, true, true, target->str());
+    header_stream_.str("");
+    header_stream_.clear();
     // Retain C-host wrapper initialization, with an FFI/CUDA-only prelude.
     decl_stream.str("");
     decl_stream.clear();
@@ -111,9 +113,14 @@ class CodeGenCUDAHost : public CodeGenCHost {
   Check(cuLaunchKernelEx(&config, function, parameters.data(), nullptr));
 }
 )CUDA";
+    header_stream_ << decl_stream.str();
+    decl_stream.str("");
+    decl_stream.clear();
   }
 
   using CodeGenCHost::PrintType;
+
+  void PrintStorageType(const Type& type, std::ostream& os) override { PrintType(type, os); }
 
   void PrintType(const PrimType& type, std::ostream& os) override {
     if (type.IsScalar() && type.MatchesElementType(kDLBfloat, 16)) {
@@ -298,9 +305,9 @@ class CodeGenCUDAHost : public CodeGenCHost {
         value = arguments[index - 1];
         switch (info.kind) {
           case tvm_cuda_launch::ValueKind::kInteger:
-            TVM_FFI_CHECK(
-                prim_type && prim_type->IsScalar() && prim_type->MatchesCode(kDLInt, kDLUInt),
-                ValueError)
+            TVM_FFI_CHECK(prim_type && prim_type->IsScalar() &&
+                              prim_type->MatchesCode(kDLInt, kDLUInt, kDLBool),
+                          ValueError)
                 << "CUDA launch field " << info.name << " requires a scalar integer";
             setter = "SetInt";
             break;

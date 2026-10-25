@@ -309,11 +309,7 @@ class LiteralDoc : public ExprDoc {
    * \param v The string value.
    * \param p The object path
    */
-  static LiteralDoc DataType(DLDataType v, const ffi::Optional<AccessPath>& p) {
-    std::string dtype =
-        v == DLDataType{kDLOpaqueHandle, 0, 0} ? "void" : ffi::DLDataTypeToString(v);
-    return LiteralDoc::Str(dtype, p);
-  }
+  TVM_TIRX_DLL static ExprDoc DataType(DLDataType v, const ffi::Optional<AccessPath>& p);
   /*!
    * \brief Create a LiteralDoc to represent device.
    * \param v The device.

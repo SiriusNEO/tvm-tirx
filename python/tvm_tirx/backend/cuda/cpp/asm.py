@@ -497,7 +497,7 @@ def codegen_s_tir_cp_async_raw(*args):
                 raise ValueError(f"unsupported legacy predicated cp.async size: {cp_size_v}")
             body = (
                 f"  uint8_t* dst_p = (uint8_t*)dst + dst_off{dst_scale};\n"
-                f"  uint8_t* src_p = (uint8_t*)src + src_off{src_scale};\n"
+                f"  const uint8_t* src_p = (const uint8_t*)src + src_off{src_scale};\n"
                 "  unsigned int dst_addr = __cvta_generic_to_shared(dst_p);\n"
                 "  __asm__ __volatile__(\n"
                 '    "{\\n"\n'
@@ -512,7 +512,7 @@ def codegen_s_tir_cp_async_raw(*args):
             )
             source_code = (
                 f"\n__forceinline__ __device__ void {func_name}"
-                "(void* dst, int dst_off, void* src, int src_off, int predicate) {\n"
+                "(void* dst, int dst_off, const void* src, int src_off, int predicate) {\n"
                 f"{body}\n"
                 "}\n"
             )
@@ -529,7 +529,7 @@ def codegen_s_tir_cp_async_raw(*args):
         func_name = f"ptx_cp_async_legacy_{ca_or_cg}_{cp_size_v}_{dst_elem_bytes}_{src_elem_bytes}"
         body = (
             f"  uint8_t* dst_p = (uint8_t*)dst + dst_off{dst_scale};\n"
-            f"  uint8_t* src_p = (uint8_t*)src + src_off{src_scale};\n"
+            f"  const uint8_t* src_p = (const uint8_t*)src + src_off{src_scale};\n"
             "  unsigned int dst_addr = __cvta_generic_to_shared(dst_p);\n"
             f'  asm volatile("cp.async.{ca_or_cg}.shared.global'
             ' [%0], [%1], %2;"\n'
@@ -537,7 +537,7 @@ def codegen_s_tir_cp_async_raw(*args):
         )
         source_code = (
             f"\n__forceinline__ __device__ void {func_name}"
-            "(void* dst, int dst_off, void* src, int src_off) {\n"
+            "(void* dst, int dst_off, const void* src, int src_off) {\n"
             f"{body}\n"
             "}\n"
         )

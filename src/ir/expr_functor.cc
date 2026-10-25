@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ir/expr_functor.h>
+#include <tvm/ir/op.h>
 
 namespace tvm {
 
@@ -128,6 +129,9 @@ ffi::Optional<VisitInterrupt> ExprVisitor::Visit_(const CallNode* node) {
     TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(node->op));
   }
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(node->args));
+  if (CallAttrsMayContainExpr(node)) {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(node->attrs));
+  }
   // Empty type arguments are skipped, including the container callback.
   if (!node->ty_args.empty()) {
     TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(node->ty_args));
@@ -489,18 +493,24 @@ UnchangedOr<Expr> ExprMutator::Mutate_(const CallNode* node, InplaceMode inplace
     op_u = Mutate(node->op, inplace_mode);
   }
   auto args_u = Mutate(node->args, inplace_mode).as_or_throw<UnchangedOr<ffi::Array<Expr>>>();
+  UnchangedOr<ffi::Optional<Attrs>> attrs_u = ffi::Unchanged();
+  if (CallAttrsMayContainExpr(node)) {
+    attrs_u = Mutate(node->attrs, inplace_mode).as_or_throw<UnchangedOr<ffi::Optional<Attrs>>>();
+  }
   UnchangedOr<ffi::Array<Type>> ty_args_u = ffi::Unchanged();
   if (!node->ty_args.empty()) {
     ty_args_u = Mutate(node->ty_args, inplace_mode).as_or_throw<UnchangedOr<ffi::Array<Type>>>();
   }
   if (ty_u.UnchangedOrSameAs(node->ty) && op_u.UnchangedOrSameAs(node->op) &&
-      args_u.UnchangedOrSameAs(node->args) && ty_args_u.UnchangedOrSameAs(node->ty_args))
+      args_u.UnchangedOrSameAs(node->args) && attrs_u.UnchangedOrSameAs(node->attrs) &&
+      ty_args_u.UnchangedOrSameAs(node->ty_args))
     return ffi::Unchanged();
   if (inplace_mode == InplaceMode::kAllow) {
     auto* writable = const_cast<CallNode*>(node);
     if (!ty_u.IsUnchanged()) writable->ty = std::move(ty_u).ValueUnchecked();
     if (!op_u.IsUnchanged()) writable->op = std::move(op_u).ValueUnchecked();
     if (!args_u.IsUnchanged()) writable->args = std::move(args_u).ValueUnchecked();
+    if (!attrs_u.IsUnchanged()) writable->attrs = std::move(attrs_u).ValueUnchecked();
     if (!ty_args_u.IsUnchanged()) writable->ty_args = std::move(ty_args_u).ValueUnchecked();
     return ffi::Unchanged();
   }
@@ -508,6 +518,7 @@ UnchangedOr<Expr> ExprMutator::Mutate_(const CallNode* node, InplaceMode inplace
   if (!ty_u.IsUnchanged()) copy->ty = std::move(ty_u).ValueUnchecked();
   if (!op_u.IsUnchanged()) copy->op = std::move(op_u).ValueUnchecked();
   if (!args_u.IsUnchanged()) copy->args = std::move(args_u).ValueUnchecked();
+  if (!attrs_u.IsUnchanged()) copy->attrs = std::move(attrs_u).ValueUnchecked();
   if (!ty_args_u.IsUnchanged()) copy->ty_args = std::move(ty_args_u).ValueUnchecked();
   return Expr(std::move(copy));
 }

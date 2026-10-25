@@ -17,6 +17,8 @@
 """Tests for functions in tvm/python/tvm/support/nvcc.py."""
 
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,6 +59,33 @@ def test_find_cuda_target_include_absent(tmp_path, monkeypatch):
     monkeypatch.setattr(nvcc.platform, "machine", lambda: "aarch64")
     monkeypatch.setattr(nvcc.platform, "system", lambda: "Linux")
     assert nvcc._find_cuda_target_include(str(tmp_path)) is None
+
+
+@pytest.mark.parametrize("arch", ["sm_90a", "sm_100a", "sm_103a", "sm_100f"])
+@pytest.mark.parametrize("output_format", ["fatbin", "ptx", "cubin"])
+def test_nvcc_preserves_architecture_qualifiers(monkeypatch, arch, output_format):
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        Path(command[command.index("-o") + 1]).write_bytes(b"test-compiler-output")
+        return SimpleNamespace(returncode=0, communicate=lambda: (b"", None))
+
+    monkeypatch.setattr(nvcc.subprocess, "Popen", run)
+    artifact, _ = nvcc._compile_cuda_nvcc("", output_format, arch)
+    assert artifact == b"test-compiler-output"
+    command = commands[0]
+    virtual_arch = "compute_" + arch.removeprefix("sm_")
+    if output_format == "fatbin":
+        assert command[command.index("-gencode") + 1] == (
+            f"arch={virtual_arch},code=[{arch},{virtual_arch}]"
+        )
+        assert "-arch" not in command
+    elif output_format == "ptx":
+        assert command[command.index("-arch") + 1] == virtual_arch
+        assert command[command.index("-code") + 1] == virtual_arch
+    else:
+        assert command[command.index("-arch") + 1] == arch
 
 
 if __name__ == "__main__":

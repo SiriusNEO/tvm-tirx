@@ -120,7 +120,7 @@ TVM_DECLARE_LOGICAL_OP(prim::Not);
  */
 template <typename Op, typename OpNode>
 inline IntervalSet Combine(AnalyzerObj* analyzer, IntervalSet a, IntervalSet b, const OpNode* op) {
-  PrimType dtype = op->ty.template as_or_throw<PrimType>();
+  PrimType dtype = op->ty.template as_or_throw<PrimType>().WithLanes(1);
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     PrimExpr expr{ffi::UnsafeInit{}};
     if (auto res = TryConstFold<Op>(a->min_value, b->min_value)) {
@@ -409,7 +409,13 @@ class IntervalSetEvaluator : public tvm::ExprFunctor<IntervalSet(const Expr&)> {
         dom_constraints_(dom_constraints),
         eval_vec_(eval_vec) {}
 
-  IntervalSet Eval(const PrimExpr& val) { return this->Dispatch(val); }
+  IntervalSet Eval(const PrimExpr& val) {
+    IntervalSet result = this->Dispatch(val);
+    if (eval_vec_ && (!result->min_value.ty().IsScalar() || !result->max_value.ty().IsScalar())) {
+      return IntervalSet::Everything();
+    }
+    return result;
+  }
   // evaluate and relax the set
   IntervalSet Eval(IntervalSet val) {
     // avoid recursive indefinite recursive expansion.
@@ -568,18 +574,33 @@ class IntervalSetEvaluator : public tvm::ExprFunctor<IntervalSet(const Expr&)> {
 
   IntervalSet Dispatch_(const prim::CastNode* op) final {
     IntervalSet value_set = this->Eval(op->value);
+    PrimType target_type = op->ty.as_or_throw<PrimType>();
+    if (eval_vec_) target_type = target_type.WithLanes(1);
     // short cut for the int set.
     if (value_set->min_value.same_as(value_set->max_value)) {
       if (value_set->IsEmpty()) return value_set;
-      return IntervalSet::SinglePoint(
-          prim::cast(value_set->min_value, op->ty.as_or_throw<PrimType>()));
+      return IntervalSet::SinglePoint(prim::cast(value_set->min_value, target_type));
     }
-    PrimExpr min_value = value_set->HasLowerBound()
-                             ? prim::cast(value_set->min_value, op->ty.as_or_throw<PrimType>())
-                             : prim::neg_inf();
-    PrimExpr max_value = value_set->HasUpperBound()
-                             ? prim::cast(value_set->max_value, op->ty.as_or_throw<PrimType>())
-                             : prim::pos_inf();
+    if (target_type.MatchesCode(DLDataTypeCode::kDLBool) ||
+        target_type.MatchesElementType(DLDataTypeCode::kDLInt, 1)) {
+      return IntervalSet(MakeConst(target_type, 0), MakeConst(target_type, 1));
+    }
+    if (op->value.ty().MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt,
+                                   DLDataTypeCode::kDLBool) &&
+        target_type.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt,
+                                DLDataTypeCode::kDLBool)) {
+      PrimExpr lower_limit = prim::min_value(target_type);
+      PrimExpr upper_limit = prim::max_value(target_type);
+      if (!value_set->HasLowerBound() || !value_set->HasUpperBound() ||
+          !analyzer_->CanProve(value_set->min_value >= lower_limit) ||
+          !analyzer_->CanProve(value_set->max_value <= upper_limit)) {
+        return IntervalSet(lower_limit, upper_limit);
+      }
+    }
+    PrimExpr min_value = value_set->HasLowerBound() ? prim::cast(value_set->min_value, target_type)
+                                                    : prim::neg_inf();
+    PrimExpr max_value = value_set->HasUpperBound() ? prim::cast(value_set->max_value, target_type)
+                                                    : prim::pos_inf();
     return IntervalSet(min_value, max_value);
   }
 

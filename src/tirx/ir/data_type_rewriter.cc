@@ -22,11 +22,10 @@
  * \brief Rewrite the data type of expressions.
  */
 
-#include "data_type_rewriter.h"
-
 #include <tvm/ffi/cast.h>
 #include <tvm/ir/op.h>
 #include <tvm/ir/prim/op.h>
+#include <tvm/tirx/data_type_rewriter.h>
 #include <tvm/tirx/op/region.h>
 
 #include <algorithm>
@@ -161,6 +160,8 @@ UnchangedOr<PrimExpr> DataTypeLegalizer::Mutate_(const prim::RampNode* op,
   PrimExpr stride = std::move(stride_result).ValueOrUnchanged(op->stride);
   if (base_unchanged && stride_unchanged && base.ty() == stride.ty()) {
     return ffi::Unchanged();
+  } else if (base.ty() == stride.ty()) {
+    return prim::Ramp(base, stride, op->lanes);
   } else {
     PrimType base_dtype = base.ty();
     PrimType stride_dtype = stride.ty();
@@ -489,7 +490,7 @@ TVM_DEFINE_CMPOP_EXPR_MUTATE_WITH_TYPE_MATCH(prim::GENode, operator>=);
 
 UnchangedOr<Expr> IndexDataTypeRewriter::Mutate_(const CallNode* op, InplaceMode inplace_mode) {
   // handle if_then_else condition
-  if (op->op.same_as(prim::if_then_else_op())) {
+  if (op->op.same_as(prim::if_then_else_op()) && op->ty.as<PrimTypeNode>()) {
     bool is_condition = is_condition_;
     is_condition_ = true;
     PrimExpr cond = Mutate(op->args[0]).ValueOrUnchanged(op->args[0]).as_or_throw<PrimExpr>();
@@ -499,7 +500,10 @@ UnchangedOr<Expr> IndexDataTypeRewriter::Mutate_(const CallNode* op, InplaceMode
         Mutate(op->args[2]).ValueOrUnchanged(op->args[2]).as_or_throw<PrimExpr>();
     PrimType true_dtype = true_value.ty();
     PrimType false_dtype = false_value.ty();
-    PrimType dtype = true_dtype.WithBits(std::max(true_dtype.bits(), false_dtype.bits()));
+    PrimType dtype = op->ty.as_or_throw<PrimType>();
+    if (true_dtype.MatchesCode(kDLInt, kDLUInt) && false_dtype.MatchesCode(kDLInt, kDLUInt)) {
+      dtype = true_dtype.WithBits(std::max(true_dtype.bits(), false_dtype.bits()));
+    }
     if (true_dtype != dtype) true_value = prim::cast(true_value, dtype);
     if (false_dtype != dtype) false_value = prim::cast(false_value, dtype);
     return Call(dtype, op->op, {cond, true_value, false_value}, op->attrs, {}, op->loc)
@@ -529,8 +533,10 @@ UnchangedOr<PrimExpr> IndexDataTypeRewriter::Mutate_(const prim::SelectNode* op,
   } else {
     PrimType true_dtype = true_value.ty();
     PrimType false_dtype = false_value.ty();
-    int bits = std::max(true_dtype.bits(), false_dtype.bits());
-    PrimType dtype = true_dtype.WithBits(bits);
+    PrimType dtype = op->ty.as_or_throw<PrimType>();
+    if (true_dtype.MatchesCode(kDLInt, kDLUInt) && false_dtype.MatchesCode(kDLInt, kDLUInt)) {
+      dtype = true_dtype.WithBits(std::max(true_dtype.bits(), false_dtype.bits()));
+    }
     if (true_dtype->dtype != dtype->dtype) true_value = prim::cast(true_value, dtype);
     if (false_dtype->dtype != dtype->dtype) false_value = prim::cast(false_value, dtype);
     return prim::Select(condition, true_value, false_value);
@@ -564,9 +570,10 @@ Function IndexDataTypeNormalizer::Rewrite(Function func) {
   };
   auto seed = [this](const VarNode* var) {
     auto dtype = var->ty.as<PrimType>();
-    if (dtype && CanRewriteDType(dtype.value()) && dtype.value() != target_data_type_ &&
-        VarRemapGet(ffi::AnyView(var)) == nullptr) {
-      VarRemapSet(ffi::AnyView(var), ffi::GetRef<Var>(var).CopyWithDType(target_data_type_));
+    if (dtype && CanRewriteDType(dtype.value()) && VarRemapGet(ffi::AnyView(var)) == nullptr) {
+      PrimType target = target_data_type_.WithLanes(dtype.value().lanes());
+      if (dtype.value() != target)
+        VarRemapSet(ffi::AnyView(var), ffi::GetRef<Var>(var).CopyWithDType(target));
     }
   };
   auto collector = ffi::make_object<IndexVarCollector>(seed);
@@ -611,7 +618,8 @@ UnchangedOr<PrimExpr> IndexDataTypeNormalizer::Mutate_(const prim::CastNode* op,
   PrimType dtype = op->ty.as_or_throw<PrimType>();
   if (is_enabled_ && CanRewriteDType(dtype)) {
     PrimExpr value = this->Mutate(op->value, inplace_mode).ValueOrUnchanged(op->value);
-    return value.ty() == target_data_type_ ? value : prim::Cast(target_data_type_, value);
+    PrimType target = target_data_type_.WithLanes(dtype.lanes());
+    return value.ty() == target ? value : prim::Cast(target, value);
   }
   return IndexDataTypeRewriter::Mutate_(op, inplace_mode);
 }

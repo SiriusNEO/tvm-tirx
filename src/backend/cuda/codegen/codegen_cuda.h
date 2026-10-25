@@ -66,6 +66,10 @@ class CodeGenCUDA final : public CodeGenC {
   void PrintVecBinaryOp(const std::string& op, const PrimType& t, PrimExpr lhs, PrimExpr rhs,
                         std::ostream& os) final;              // NOLINT(*)
   void PrintType(const PrimType& t, std::ostream& os) final;  // NOLINT(*)
+  void PrintStorageType(const Type& type, std::ostream& os) final;
+  bool SupportsCustomDTypeArithmetic(PrimType dtype) const final {
+    return CustomDTypeStorage(dtype).MatchesCode(kDLFloat);
+  }
   void PrintVecConstructor(const PrimType& t, std::ostream& os) final;
   void PrintVecElemLoad(const std::string& vec, const PrimType& t, int i,
                         std::ostream& os) final;  // NOLINT(*)
@@ -77,14 +81,27 @@ class CodeGenCUDA final : public CodeGenC {
   std::string CastFromTo(std::string value, const PrimType& from, const PrimType& target) final;
   void AddUtilFunction(const std::string& name, const std::string& code);
   // overload visitor
-  void Dispatch_(const prim::RampNode* op, std::ostream& os) final;       // NOLINT(*)
-  void Dispatch_(const prim::SelectNode* op, std::ostream& os) final;     // NOLINT(*)
+  void Dispatch_(const prim::RampNode* op, std::ostream& os) final;    // NOLINT(*)
+  void Dispatch_(const prim::SelectNode* op, std::ostream& os) final;  // NOLINT(*)
+  void Dispatch_(const prim::NotNode* op, std::ostream& os) final;
+  void Dispatch_(const prim::BitwiseNotNode* node, std::ostream& output) final;
+  void Dispatch_(const TensorLoadNode* op, std::ostream& os) final;
+  void Dispatch_(const TensorStoreNode* op) final;
   void Dispatch_(const prim::BroadcastNode* op, std::ostream& os) final;  // NOLINT(*)
   void Dispatch_(const FloatImmNode* op, std::ostream& os) final;
   void Dispatch_(const CallNode* op, std::ostream& os) final;
   void Dispatch_(const prim::CastNode* op, std::ostream& os) final;
+  void Dispatch_(const prim::MinNode* node, std::ostream& output) final;
+  void Dispatch_(const prim::MaxNode* node, std::ostream& output) final;
+  void Dispatch_(const prim::EQNode* node, std::ostream& output) final;
+  void Dispatch_(const prim::NENode* node, std::ostream& output) final;
+  void Dispatch_(const prim::LTNode* node, std::ostream& output) final;
+  void Dispatch_(const prim::LENode* node, std::ostream& output) final;
+  void Dispatch_(const prim::GTNode* node, std::ostream& output) final;
+  void Dispatch_(const prim::GENode* node, std::ostream& output) final;
   void Dispatch_(const EvaluateNode* op) final;
   void Dispatch_(const ReturnNode* op) final;
+  void Dispatch_(const AssertStmtNode* op) final;
   void Dispatch_(const BindNode* op) final;
   void DispatchAllocTensor(const BindNode* op, const CallNode* buffer_call);
 
@@ -96,6 +113,8 @@ class CodeGenCUDA final : public CodeGenC {
                        bool skip_first_arg, std::ostream& os) final;  // NOLINT(*)
 
  private:
+  bool PrintLowPrecisionComparison(const std::string& operation, PrimExpr left, PrimExpr right,
+                                   std::ostream& output);
   void PrintFunctionPrefix(const Function& func, std::ostream& os);
   std::array<PrimExpr, 6> launch_dimensions_{IntImm::Int32(1), IntImm::Int32(1), IntImm::Int32(1),
                                              IntImm::Int32(1), IntImm::Int32(1), IntImm::Int32(1)};

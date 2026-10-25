@@ -154,8 +154,10 @@ void CodeGenSourceBase::PrintType(const Type& type, std::ostream& os) {  // NOLI
   if (auto* ptr = type.as<PrimTypeNode>()) {
     return PrintType(ffi::GetRef<PrimType>(ptr), os);
   } else if (auto* ptr = type.as<PtrTypeNode>()) {
-    PrintType(ptr->element_type, os);
+    PrintStorageType(ptr->element_type, os);
     os << '*';
+  } else if (type.as<StringTypeNode>()) {
+    os << "const char*";
   } else if (IsVoidType(type)) {
     os << "void";
   } else {

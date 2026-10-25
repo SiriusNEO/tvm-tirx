@@ -101,9 +101,15 @@ TVM_TIRX_DLL Pass VectorizeLoop(bool enable_vectorize = true);
  *  Trying to share space between allocations to make
  *  a static allocation plan when possible.
  *
+ * \param enable_reuse Whether to reuse storage across disjoint lifetimes.
+ * \param detect_inplace Whether to identify safe in-place updates.
+ * \param preserve_shared_allocations Leave shared allocations to a downstream storage planner.
+ * \param allow_local_inplace Allow verified in-place updates in flat local storage.
  * \return The pass.
  */
-TVM_TIRX_DLL Pass StorageRewrite();
+TVM_TIRX_DLL Pass StorageRewrite(bool enable_reuse = true, bool detect_inplace = true,
+                                 bool preserve_shared_allocations = false,
+                                 bool allow_local_inplace = false);
 
 /*!
  * \brief unroll the constant loop marked by unroll.
@@ -122,9 +128,10 @@ TVM_TIRX_DLL Pass RemoveNoOp();
 
 /*!
  * \brief Hoist loop-invariant If statements outside eligible loops.
+ * \param allow_nontrivial_else Whether a false-path copy of the loop may be emitted.
  * \return The pass.
  */
-TVM_TIRX_DLL Pass HoistIf();
+TVM_TIRX_DLL Pass HoistIf(bool allow_nontrivial_else = true);
 
 /*!
  * \brief Renormalize the split pattern from floordiv(floormod()) to floormod(floordiv()).
@@ -202,6 +209,12 @@ TVM_TIRX_DLL Pass MakePackedAPI();
  * \return The pass.
  */
 TVM_TIRX_DLL Pass SplitHostDevice();
+
+/*! \brief Outline device regions without lowering their call sites. */
+TVM_TIRX_DLL Pass OutlineDeviceRegions();
+
+/*! \brief Lower calls to outlined device functions into runtime kernel launches. */
+TVM_TIRX_DLL Pass LowerDeviceKernelLaunch();
 
 /*!
  * \brief skip assert stmt.

@@ -32,13 +32,14 @@ endfunction()
 
 # ######### Common options ##########
 
-set(TVM_TIRX_VERSION "0.1.0a2")
+set(TVM_TIRX_VERSION "0.1.0a2+tilelang.1")
 if(PROJECT_IS_TOP_LEVEL)
   tvm_tirx_option(TVM_TIRX_BUILD_TESTS BOOL OFF "Build C++ tests")
   tvm_tirx_option(TVM_TIRX_BUILD_PYTHON_MODULE BOOL OFF "Build the Python package with scikit-build-core")
 endif()
 tvm_tirx_option(TVM_TIRX_USE_THREADS BOOL ON "Build with thread support")
 tvm_tirx_option(TVM_TIRX_USE_CUSTOM_LOGGING BOOL OFF "Use user-defined logging implementations")
+tvm_tirx_option(TVM_TIRX_EXPORT_ALL_SYMBOLS BOOL OFF "Export compiler extension symbols")
 
 # ######### LLVM ##########
 

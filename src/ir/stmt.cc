@@ -149,11 +149,11 @@ TVM_FFI_INLINE ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> RegionStmtVisit
     ffi::StructuralVisitorObj* visitor, ffi::AnyView value) noexcept {
   const RegionStmtNode* self =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const RegionStmtNode>(value);
-  TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->attrs));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->args));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->WithDefRegionKind(
       kTVMFFIDefRegionKindSimple, [&]() { return visitor->VisitExpected(self->body_params); }));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->body));
+  TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->attrs));
   return visitor->WithDefRegionKind(kTVMFFIDefRegionKindSimple,
                                     [&]() { return visitor->VisitExpected(self->result_vars); });
 }
@@ -162,8 +162,6 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> RegionStmtMutate(
     ffi::StructuralMutatorObj* mutator, ffi::AnyView value) noexcept {
   const RegionStmtNode* self =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const RegionStmtNode>(value);
-  TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<DictAttrs>, mapped_attrs,
-                                    mutator->MutateExpected(self->attrs));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Expr>>, mapped_args,
                                     mutator->MutateExpected(self->args));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Var>>, mapped_body_params,
@@ -172,6 +170,8 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> RegionStmtMutate(
                                     }));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<Stmt>, mapped_body,
                                     mutator->MutateExpected(self->body));
+  TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<DictAttrs>, mapped_attrs,
+                                    mutator->MutateExpected(self->attrs));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Var>>, mapped_result_vars,
                                     mutator->WithDefRegionKind(kTVMFFIDefRegionKindSimple, [&]() {
                                       return mutator->MutateExpected(self->result_vars);
@@ -197,8 +197,6 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> RegionStmtMaybeInplaceM
     ffi::StructuralMutatorObj* mutator, ffi::AnyView value) noexcept {
   const RegionStmtNode* self =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const RegionStmtNode>(value);
-  TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<DictAttrs>, mapped_attrs,
-                                    mutator->MutateExpected(self->attrs, ffi::InplaceMode::kAllow));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Expr>>, mapped_args,
                                     mutator->MutateExpected(self->args, ffi::InplaceMode::kAllow));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Var>>, mapped_body_params,
@@ -208,6 +206,8 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> RegionStmtMaybeInplaceM
                                     }));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<Stmt>, mapped_body,
                                     mutator->MutateExpected(self->body, ffi::InplaceMode::kAllow));
+  TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<DictAttrs>, mapped_attrs,
+                                    mutator->MutateExpected(self->attrs, ffi::InplaceMode::kAllow));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Var>>, mapped_result_vars,
                                     mutator->WithDefRegionKind(kTVMFFIDefRegionKindSimple, [&]() {
                                       return mutator->MutateExpected(self->result_vars,
@@ -272,7 +272,6 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> AssertStmtMaybeInplaceM
 
 TVM_FFI_INLINE ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> ForVisit(
     ffi::StructuralVisitorObj* visitor, ffi::AnyView value) noexcept {
-  // skips: kind and constant annotations; unlike SBlock annotations, these carry no expressions.
   const ForNode* self =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const ForNode>(value);
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->WithDefRegionKind(
@@ -281,12 +280,12 @@ TVM_FFI_INLINE ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> ForVisit(
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->end));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->step));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->body));
+  TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->annotations));
   return std::nullopt;
 }
 
 TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> ForMutate(
     ffi::StructuralMutatorObj* mutator, ffi::AnyView value) noexcept {
-  // skips: kind and constant annotations; unlike SBlock annotations, these carry no expressions.
   const ForNode* self =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const ForNode>(value);
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<PrimVar>, mapped_var,
@@ -301,9 +300,12 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> ForMutate(
                                     mutator->MutateExpected(self->step));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<Stmt>, mapped_body,
                                     mutator->MutateExpected(self->body));
+  TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<decltype(self->annotations)>,
+                                    mapped_annotations, mutator->MutateExpected(self->annotations));
   if (mapped_var.UnchangedOrSameAs(self->var) && mapped_begin.UnchangedOrSameAs(self->begin) &&
       mapped_end.UnchangedOrSameAs(self->end) && mapped_body.UnchangedOrSameAs(self->body) &&
-      mapped_step.UnchangedOrSameAs(self->step)) {
+      mapped_step.UnchangedOrSameAs(self->step) &&
+      mapped_annotations.UnchangedOrSameAs(self->annotations)) {
     return ffi::Unchanged();
   }
   ffi::ObjectPtr<ForNode> copy = ffi::make_object<ForNode>(*self);
@@ -312,12 +314,12 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> ForMutate(
   copy->end = std::move(mapped_end).ValueOrUnchanged(std::move(copy->end));
   copy->body = std::move(mapped_body).ValueOrUnchanged(std::move(copy->body));
   copy->step = std::move(mapped_step).ValueOrUnchanged(std::move(copy->step));
+  copy->annotations = std::move(mapped_annotations).ValueOrUnchanged(std::move(copy->annotations));
   return ffi::Any(std::move(copy));
 }
 
 TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> ForMaybeInplaceMutate(
     ffi::StructuralMutatorObj* mutator, ffi::AnyView value) noexcept {
-  // skips: kind and constant annotations; unlike SBlock annotations, these carry no expressions.
   ForNode* self = const_cast<ForNode*>(
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const ForNode>(value));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<PrimVar>, mapped_var,
@@ -333,9 +335,13 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> ForMaybeInplaceMutate(
                                     mutator->MutateExpected(self->step, ffi::InplaceMode::kAllow));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<Stmt>, mapped_body,
                                     mutator->MutateExpected(self->body, ffi::InplaceMode::kAllow));
+  TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(
+      ffi::UnchangedOr<decltype(self->annotations)>, mapped_annotations,
+      mutator->MutateExpected(self->annotations, ffi::InplaceMode::kAllow));
   if (mapped_var.UnchangedOrSameAs(self->var) && mapped_begin.UnchangedOrSameAs(self->begin) &&
       mapped_end.UnchangedOrSameAs(self->end) && mapped_body.UnchangedOrSameAs(self->body) &&
-      mapped_step.UnchangedOrSameAs(self->step)) {
+      mapped_step.UnchangedOrSameAs(self->step) &&
+      mapped_annotations.UnchangedOrSameAs(self->annotations)) {
     return ffi::Unchanged();
   }
   if (!mapped_var.IsUnchanged()) self->var = std::move(mapped_var).ValueUnchecked();
@@ -343,6 +349,8 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> ForMaybeInplaceMutate(
   if (!mapped_end.IsUnchanged()) self->end = std::move(mapped_end).ValueUnchecked();
   if (!mapped_body.IsUnchanged()) self->body = SeqStmt(std::move(mapped_body).ValueUnchecked());
   if (!mapped_step.IsUnchanged()) self->step = std::move(mapped_step).ValueUnchecked();
+  if (!mapped_annotations.IsUnchanged())
+    self->annotations = std::move(mapped_annotations).ValueUnchecked();
   return ffi::Unchanged();
 }
 

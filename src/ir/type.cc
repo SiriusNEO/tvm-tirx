@@ -21,6 +21,8 @@
  * \file src/ir/type.cc
  * \brief Common type system AST nodes throughout the IR.
  */
+#include <tvm/ffi/extra/json.h>
+#include <tvm/ffi/extra/serialization.h>
 #include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/function.h>
@@ -29,11 +31,23 @@
 #include <tvm/ir/type.h>
 
 #include <cstdint>
+#include <mutex>
 #include <unordered_map>
 
 namespace tvm {
 
 namespace {
+
+struct CustomDTypeRegistry {
+  std::mutex mutex;
+  std::unordered_map<std::string, int> codes;
+  std::unordered_map<int, std::pair<std::string, PrimType>> types;
+
+  static CustomDTypeRegistry& Global() {
+    static CustomDTypeRegistry registry;
+    return registry;
+  }
+};
 
 DLDataType ScalableVectorDType(DLDataTypeCode code, int bits, int lanes) {
   TVM_FFI_ICHECK_GT(lanes, 1) << "Invalid value for vscale factor " << lanes;
@@ -352,6 +366,47 @@ PrimType::PrimType(DLDataTypeCode code, int bits, int lanes)
     : PrimType(DLDataType{static_cast<uint8_t>(code), static_cast<uint8_t>(bits),
                           static_cast<uint16_t>(lanes)}) {}
 
+void RegisterCustomDType(ffi::String name, int code, PrimType storage_type) {
+  TVM_FFI_CHECK(!name.empty() && std::string(name).find_first_of("[]") == std::string::npos,
+                ValueError)
+      << "Custom dtype names must be nonempty and cannot contain brackets";
+  TVM_FFI_CHECK(code >= static_cast<int>(ffi::DLExtDataTypeCode::kDLExtCustomBegin) && code <= 255,
+                ValueError)
+      << "Custom dtype codes must be in [129, 255]";
+  TVM_FFI_CHECK(storage_type.IsScalar() && !IsCustomDType(storage_type) &&
+                    storage_type.bits() > 0 && storage_type.bits() % 8 == 0 &&
+                    storage_type.MatchesCode(kDLFloat, kDLInt, kDLUInt),
+                ValueError)
+      << "Custom dtype storage must be a byte-addressable native scalar";
+  auto& registry = CustomDTypeRegistry::Global();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  if (auto entry = registry.codes.find(name); entry != registry.codes.end()) {
+    TVM_FFI_CHECK(entry->second == code && registry.types.at(code).second == storage_type,
+                  ValueError)
+        << "Custom dtype name is already registered: " << name;
+    return;
+  }
+  TVM_FFI_CHECK(!registry.types.count(code), ValueError)
+      << "Custom dtype code is already registered: " << code;
+  registry.codes.emplace(name, code);
+  registry.types.emplace(code, std::make_pair(std::string(name), storage_type));
+}
+
+PrimType CustomDTypeStorage(PrimType dtype) {
+  if (!IsCustomDType(dtype)) return dtype;
+  auto& registry = CustomDTypeRegistry::Global();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  auto entry = registry.types.find(static_cast<int>(dtype.code()));
+  TVM_FFI_CHECK(entry != registry.types.end(), ValueError)
+      << "Unregistered custom dtype code: " << static_cast<int>(dtype.code());
+  TVM_FFI_CHECK(dtype.bits() == entry->second.second.bits(), ValueError)
+      << "Custom dtype " << entry->second.first << " requires " << entry->second.second.bits()
+      << " storage bits, got " << dtype.bits();
+  DLDataType storage = entry->second.second->dtype;
+  storage.lanes = dtype->dtype.lanes;
+  return PrimType(storage);
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   PrimTypeNode::RegisterReflection();
@@ -362,9 +417,49 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .attr(ffi::type_attr::kStructuralMutate,
             ffi::FStructuralMutate::FromNative<&PrimTypeMutate>())
       .attr(ffi::type_attr::kStructuralMaybeInplaceMutate,
-            ffi::FStructuralMutate::FromNative<&PrimTypeMaybeInplaceMutate>());
+            ffi::FStructuralMutate::FromNative<&PrimTypeMaybeInplaceMutate>())
+      .def(ffi::type_attr::kDataToJson.name,
+           [](const PrimTypeNode* node) {
+             return ffi::Array<int64_t>{node->dtype.code, node->dtype.bits, node->dtype.lanes};
+           })
+      .def(ffi::type_attr::kDataFromJson.name, [](const ffi::json::Value& data) {
+        if (auto object = data.as<ffi::json::Object>()) {
+          return PrimType(ffi::StringToDLDataType(object.value().at("dtype").cast<ffi::String>()));
+        }
+        auto fields = data.cast<ffi::Array<int64_t>>();
+        TVM_FFI_CHECK(fields.size() == 3, ValueError)
+            << "PrimType JSON data must contain [code, bits, lanes]";
+        TVM_FFI_CHECK(fields[0] >= 0 && fields[0] <= 255, ValueError)
+            << "PrimType dtype code must fit in uint8";
+        TVM_FFI_CHECK(fields[1] >= 0 && fields[1] <= 255, ValueError)
+            << "PrimType dtype bits must fit in uint8";
+        TVM_FFI_CHECK(fields[2] >= 0 && fields[2] <= 65535, ValueError)
+            << "PrimType dtype lanes must fit in uint16";
+        return PrimType(DLDataType{static_cast<uint8_t>(fields[0]), static_cast<uint8_t>(fields[1]),
+                                   static_cast<uint16_t>(fields[2])});
+      });
 
-  refl::GlobalDef().def("ir.PrimType", [](DLDataType dtype) { return PrimType(dtype); });
+  refl::GlobalDef()
+      .def("ir.PrimType", [](DLDataType dtype) { return PrimType(dtype); })
+      .def("ir.RegisterCustomDType", RegisterCustomDType)
+      .def("ir.CustomDTypeStorage", CustomDTypeStorage)
+      .def("dtype.get_custom_type_code",
+           [](ffi::String name) {
+             auto& registry = CustomDTypeRegistry::Global();
+             std::lock_guard<std::mutex> lock(registry.mutex);
+             auto entry = registry.codes.find(name);
+             TVM_FFI_CHECK(entry != registry.codes.end(), ValueError)
+                 << "Unregistered custom dtype name: " << name;
+             return entry->second;
+           })
+      .def("dtype.get_custom_type_name", [](int code) {
+        auto& registry = CustomDTypeRegistry::Global();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        auto entry = registry.types.find(code);
+        TVM_FFI_CHECK(entry != registry.types.end(), ValueError)
+            << "Unregistered custom dtype code: " << code;
+        return ffi::String(entry->second.first);
+      });
 }
 
 PrimType PrimType::Int(int bits, int lanes) {

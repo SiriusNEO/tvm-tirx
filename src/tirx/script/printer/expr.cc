@@ -50,22 +50,35 @@ ffi::Optional<ExprDoc> IndexMapDocTranslate(DocTranslatorObj* d, ffi::AnyView in
                                             const ffi::Object*) {
   const auto* map =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const tirx::IndexMapNode>(input);
-  auto translate_lambda = [&](const tirx::IndexMapNode* node) -> ExprDoc {
+  ExprDoc forward = d->WithVarScope([&]() -> ExprDoc {
     ffi::Array<IdDoc> vars;
-    for (const PrimVar& var : node->initial_indices) vars.push_back(VarDoc(d, var));
-    ffi::Array<ExprDoc> values;
-    for (const PrimExpr& expr : node->final_indices) values.push_back(d->Translate(expr).value());
-    return LambdaDoc(vars, TupleDoc(values));
-  };
-  ExprDoc forward = translate_lambda(map);
+    for (const PrimVar& var : map->initial_indices) vars.push_back(VarDoc(d, var));
+    return d->WithExtraStateScope<bool>("ir.explicit_value_type", true, [&]() -> ExprDoc {
+      ffi::Array<ExprDoc> values;
+      for (const PrimExpr& expr : map->final_indices) values.push_back(d->Translate(expr).value());
+      return LambdaDoc(vars, TupleDoc(values));
+    });
+  });
+  ffi::Array<ffi::String> keys;
+  ffi::Array<ExprDoc> values;
+  if (!map->initial_indices.empty()) {
+    ffi::Array<ExprDoc> dtypes;
+    bool uniform = true;
+    for (const PrimVar& var : map->initial_indices) {
+      dtypes.push_back(LiteralDoc::Str(
+          ffi::DLDataTypeToString(var->ty.as_or_throw<PrimType>()->dtype), std::nullopt));
+      uniform &= ffi::StructuralEqual()(var->ty, map->initial_indices[0]->ty);
+    }
+    keys.push_back("index_dtype");
+    values.push_back(uniform ? dtypes[0] : ExprDoc(ListDoc(dtypes)));
+  }
   if (map->inverse_index_map.has_value()) {
     const auto* inverse = map->inverse_index_map.value().as<tirx::IndexMapNode>();
     TVM_FFI_CHECK(inverse, TypeError) << "IndexMap inverse must be an IndexMap";
-    return NamespaceDoc("tirx")
-        ->Attr("index_map")
-        ->Call({forward}, {"inverse_index_map"}, {translate_lambda(inverse)});
+    keys.push_back("inverse_index_map");
+    values.push_back(d->Translate(map->inverse_index_map.value()).value());
   }
-  return NamespaceDoc("tirx")->Attr("index_map")->Call({forward});
+  return NamespaceDoc("tirx")->Attr("index_map")->Call({forward}, keys, values);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

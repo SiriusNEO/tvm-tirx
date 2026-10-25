@@ -171,6 +171,7 @@ Expr reinterpret(Type target_ty, Expr value, Location loc) {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.reinterpret")
+      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
       .signature(sig::arg("x", "The input value."))
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure);
 }
@@ -182,6 +183,7 @@ const Op& address_of_op() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.address_of")
+      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
       .signature(sig::arg("obj", "The referenced object."))
       .set_native_fn_attr<&InferTypeAddressOf>(tvm::op_attr::kInferType)
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure);
@@ -219,6 +221,7 @@ const Op& ptr_byte_offset_op() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.ptr_byte_offset")
+      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
       .signature(sig::arg("data", "Base pointer."),
                  sig::arg<IntExpr>("byte_offset", "Offset in bytes."))
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure);
@@ -241,6 +244,7 @@ const Op& handle_add_byte_offset_op() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.handle_add_byte_offset")
+      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
       .signature(sig::arg("handle", "The handle."), sig::arg<IntExpr>("offset", "The offset."))
       .set_native_fn_attr<&InferTypePointerOffset<0, -1>>(tvm::op_attr::kInferType)
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure);
@@ -315,6 +319,7 @@ const Op& alloc_tensor_op() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.alloc_tensor")
+      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
       .set_native_fn_attr<&InferTypeTensor<true>>(tvm::op_attr::kInferType)
       .set_validator(ffi::reflection::NativeFunctionView<void(
                          const CallNode*)>::FromNative<&ValidateTensorProducer<true>>(),
@@ -332,6 +337,7 @@ const Op& decl_tensor_op() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.decl_tensor")
+      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
       .set_native_fn_attr<&InferTypeTensor<false>>(tvm::op_attr::kInferType)
       .set_validator(ffi::reflection::NativeFunctionView<void(
                          const CallNode*)>::FromNative<&ValidateTensorProducer<false>>(),
@@ -348,6 +354,7 @@ const Op& tensor_data_ptr_op() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.tensor_data_ptr")
+      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
       .signature(sig::arg("tensor", "The tensor variable."))
       .set_native_fn_attr<&InferTypeTensorDataPtr>(tvm::op_attr::kInferType)
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure);

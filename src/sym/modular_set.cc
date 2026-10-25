@@ -187,7 +187,45 @@ class ModularSetAnalyzer::Impl final
     }
   }
 
-  Entry Dispatch_(const prim::CastNode* op) final { return Dispatch(op->value); }
+  Entry Dispatch_(const prim::CastNode* op) final {
+    Entry source = Dispatch(op->value);
+    PrimType source_type = op->value.ty();
+    PrimType target_type = op->ty.as_or_throw<PrimType>();
+    if (!source_type.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt,
+                                 DLDataTypeCode::kDLBool) ||
+        !target_type.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt,
+                                 DLDataTypeCode::kDLBool))
+      return source;
+    if (source.coeff == 0) {
+      PrimExpr converted = prim::cast(MakeConst(source_type, source.base), target_type);
+      if (const auto* constant = converted.as<IntImmNode>()) {
+        if (auto value = constant->value.as<int64_t>()) return Entry(0, *value);
+      }
+      return Everything();
+    }
+    if (target_type.MatchesCode(DLDataTypeCode::kDLBool) ||
+        target_type.MatchesElementType(DLDataTypeCode::kDLInt, 1))
+      return Everything();
+    ConstIntBound bound = parent_->const_int_bound(op->value);
+    if (ffi::BigInt(bound->min_value) >=
+            prim::min_value(target_type).as_or_throw<IntImm>()->value &&
+        ffi::BigInt(bound->max_value) <=
+            prim::max_value(target_type).as_or_throw<IntImm>()->value) {
+      return source;
+    }
+    if ((source_type->dtype.code == target_type->dtype.code &&
+         source_type.bits() <= target_type.bits()) ||
+        (source_type.MatchesCode(DLDataTypeCode::kDLUInt) &&
+         target_type.MatchesCode(DLDataTypeCode::kDLInt) &&
+         source_type.bits() < target_type.bits())) {
+      return source;
+    }
+    uint64_t coefficient = source.coeff;
+    uint64_t divisor = target_type.bits() >= 63
+                           ? coefficient & (~coefficient + 1)
+                           : std::gcd(coefficient, uint64_t{1} << target_type.bits());
+    return Entry(static_cast<int64_t>(divisor), source.base);
+  }
 
   Entry Dispatch_(const IntImmNode* op) final {
     if (auto value = op->value.as<int64_t>(); value.has_value()) return Entry(0, *value);

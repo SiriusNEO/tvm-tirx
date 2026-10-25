@@ -209,11 +209,11 @@ class RegionStmtNode : public StmtNode {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<RegionStmtNode>()
         .def_ro("op", &RegionStmtNode::op)
-        .def_ro("attrs", &RegionStmtNode::attrs)
         .def_ro("args", &RegionStmtNode::args)
         .def_ro("body_params", &RegionStmtNode::body_params,
                 refl::AttachFieldFlag::SEqHashDefSimple())
         .def_ro("body", &RegionStmtNode::body)
+        .def_ro("attrs", &RegionStmtNode::attrs)
         .def_ro("result_vars", &RegionStmtNode::result_vars,
                 refl::AttachFieldFlag::SEqHashDefSimple());
   }

@@ -33,19 +33,18 @@ namespace {
 
 TVM_FFI_INLINE ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> FunctionVisit(
     ffi::StructuralVisitorObj* visitor, ffi::AnyView value) noexcept {
-  // skips: attrs (metadata), ty (derived from the function signature)
   const FunctionNode* self =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const FunctionNode>(value);
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->WithDefRegionKind(
       kTVMFFIDefRegionKindPattern, [&]() { return visitor->VisitExpected(self->params); }));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->ret_type));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->body));
+  TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(self->attrs));
   return std::nullopt;
 }
 
 TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> FunctionMutate(
     ffi::StructuralMutatorObj* mutator, ffi::AnyView value) noexcept {
-  // skips: attrs (metadata), ty (derived from the function signature)
   const FunctionNode* self =
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const FunctionNode>(value);
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Var>>, mapped_params,
@@ -56,7 +55,10 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> FunctionMutate(
                                     mutator->MutateExpected(self->ret_type));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Optional<Stmt>>, mapped_body,
                                     mutator->MutateExpected(self->body));
+  TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<DictAttrs>, mapped_attrs,
+                                    mutator->MutateExpected(self->attrs));
   if (mapped_params.UnchangedOrSameAs(self->params) &&
+      mapped_attrs.UnchangedOrSameAs(self->attrs) &&
       mapped_ret_type.UnchangedOrSameAs(self->ret_type) &&
       (mapped_body.IsUnchanged() || ffi::AnyView(mapped_body).same_as(self->body))) {
     return ffi::Unchanged();
@@ -70,13 +72,13 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> FunctionMutate(
                      ? ffi::Optional<SeqStmt>(SeqStmt(std::move(replacement).value()))
                      : std::nullopt;
   }
+  copy->attrs = std::move(mapped_attrs).ValueOrUnchanged(std::move(copy->attrs));
   copy->ty = copy->func_type_annotation();
   return ffi::Any(std::move(copy));
 }
 
 TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> FunctionMaybeInplaceMutate(
     ffi::StructuralMutatorObj* mutator, ffi::AnyView value) noexcept {
-  // skips: attrs (metadata), ty (derived from the function signature)
   FunctionNode* self = const_cast<FunctionNode*>(
       ffi::details::AnyUnsafe::RawObjectPtrFromAnyViewAfterCheck<const FunctionNode>(value));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Array<Var>>, mapped_params,
@@ -89,6 +91,11 @@ TVM_FFI_INLINE ffi::Expected<ffi::UnchangedOr<ffi::Any>> FunctionMaybeInplaceMut
       mutator->MutateExpected(self->ret_type, ffi::InplaceMode::kAllow));
   TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<ffi::Optional<Stmt>>, mapped_body,
                                     mutator->MutateExpected(self->body, ffi::InplaceMode::kAllow));
+  TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(ffi::UnchangedOr<DictAttrs>, mapped_attrs,
+                                    mutator->MutateExpected(self->attrs, ffi::InplaceMode::kAllow));
+  if (!mapped_attrs.UnchangedOrSameAs(self->attrs)) {
+    self->attrs = std::move(mapped_attrs).ValueUnchecked();
+  }
   if (!mapped_params.UnchangedOrSameAs(self->params)) {
     self->params = std::move(mapped_params).ValueUnchecked();
   }

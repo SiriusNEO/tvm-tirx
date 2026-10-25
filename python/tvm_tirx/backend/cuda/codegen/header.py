@@ -159,12 +159,16 @@ static inline __device__ __host__ half HALF_MATH_NAME(half x) {          \
 #if defined(__CUDA_ARCH__)
 #if (__CUDA_ARCH__ >= 530)
 CUDA_UNSUPPORTED_HALF_MATH_BINARY(hpow, powf)
+CUDA_UNSUPPORTED_HALF_MATH_BINARY(hfmod, fmodf)
 #if ((__CUDACC_VER_MAJOR__ < 12) || ((__CUDACC_VER_MAJOR__ == 12) && (__CUDACC_VER_MINOR__ < 8)))
 CUDA_UNSUPPORTED_HALF_MATH_UNARY(htanh, tanhf)
 #endif
 CUDA_UNSUPPORTED_HALF_MATH_UNARY(htan, tanf)
 CUDA_UNSUPPORTED_HALF_MATH_UNARY(hatan, atanf)
 CUDA_UNSUPPORTED_HALF_MATH_UNARY(herf, erf)
+CUDA_UNSUPPORTED_HALF_MATH_UNARY(hsinh, sinhf)
+CUDA_UNSUPPORTED_HALF_MATH_UNARY(hcosh, coshf)
+CUDA_UNSUPPORTED_HALF_MATH_UNARY(hnearbyint, nearbyintf)
 #else
 CUDA_UNSUPPORTED_HALF_MATH_UNARY(hexp, exp)
 #endif
@@ -176,8 +180,8 @@ CUDA_UNSUPPORTED_HALF_MATH_UNARY(hexp, exp)
 
     if "bf16" in tags:
         header += R"""
-#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 800)
 #include <cuda_bf16.h>
+#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 800)
 __device__ nv_bfloat16 max(nv_bfloat16 a, nv_bfloat16 b)
 {
   return __hgt(a, b) ? a : b;
@@ -214,12 +218,16 @@ static inline __device__ __host__ nv_bfloat16 HALF_MATH_NAME(nv_bfloat16 x) {   
 }
 
 CUDA_UNSUPPORTED_HALF_MATH_BINARY(hpow, powf)
+CUDA_UNSUPPORTED_HALF_MATH_BINARY(hfmod, fmodf)
 #if ((__CUDACC_VER_MAJOR__ < 12) || ((__CUDACC_VER_MAJOR__ == 12) && (__CUDACC_VER_MINOR__ < 8)))
 CUDA_UNSUPPORTED_HALF_MATH_UNARY(htanh, tanhf)
 #endif
 CUDA_UNSUPPORTED_HALF_MATH_UNARY(htan, tanf)
 CUDA_UNSUPPORTED_HALF_MATH_UNARY(hatan, atanf)
 CUDA_UNSUPPORTED_HALF_MATH_UNARY(herf, erf)
+CUDA_UNSUPPORTED_HALF_MATH_UNARY(hsinh, sinhf)
+CUDA_UNSUPPORTED_HALF_MATH_UNARY(hcosh, coshf)
+CUDA_UNSUPPORTED_HALF_MATH_UNARY(hnearbyint, nearbyintf)
 
 #undef CUDA_UNSUPPORTED_HALF_MATH_BINARY
 #undef CUDA_UNSUPPORTED_HALF_MATH_UNARY
@@ -288,15 +296,6 @@ struct fp6_e3x16_t {
         header += R"""
 #if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 800)
 #include <cuda_fp4.h>
-using fp4_e2_t = __nv_fp4_e2m1;
-using fp4_e2x2_t = __nv_fp4x2_e2m1;
-using fp4_e2x4_t = __nv_fp4x4_e2m1;
-struct fp4_e2x8_t {
- fp4_e2_t data[8];
-};
-struct fp4_e2x16_t {
- fp4_e2_t data[16];
-};
 #endif // __CUDA_ARCH__ >= 800
 """
 

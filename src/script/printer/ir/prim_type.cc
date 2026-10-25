@@ -64,9 +64,11 @@ bool HasPrimTypeShorthand(const PrimType& type) {
        (type.bits() == 8 || type.bits() == 16 || type.bits() == 32 || type.bits() == 64)) ||
       (type.MatchesCode(kDLFloat) &&
        (type.bits() == 16 || type.bits() == 32 || type.bits() == 64)) ||
-      type.MatchesCode(kDLFloat8_e3m4, kDLFloat8_e4m3, kDLFloat8_e4m3b11fnuz, kDLFloat8_e4m3fn,
-                       kDLFloat8_e4m3fnuz, kDLFloat8_e5m2, kDLFloat8_e5m2fnuz, kDLFloat8_e8m0fnu,
-                       kDLFloat6_e2m3fn, kDLFloat6_e3m2fn, kDLFloat4_e2m1fn);
+      (type.bits() == 8 && type.MatchesCode(kDLFloat8_e3m4, kDLFloat8_e4m3, kDLFloat8_e4m3b11fnuz,
+                                            kDLFloat8_e4m3fn, kDLFloat8_e4m3fnuz, kDLFloat8_e5m2,
+                                            kDLFloat8_e5m2fnuz, kDLFloat8_e8m0fnu)) ||
+      (type.bits() == 6 && type.MatchesCode(kDLFloat6_e2m3fn, kDLFloat6_e3m2fn)) ||
+      type.MatchesElementType(kDLFloat4_e2m1fn, 4);
   bool supported_lanes = type->dtype.lanes == 1 || type->dtype.lanes == 2 ||
                          type->dtype.lanes == 4 || type->dtype.lanes == 8 ||
                          type->dtype.lanes == 16 || type->dtype.lanes == 32 ||

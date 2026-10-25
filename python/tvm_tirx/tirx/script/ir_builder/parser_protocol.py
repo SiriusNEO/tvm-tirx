@@ -740,6 +740,11 @@ def device_context(
     )
 
 
+def scope(*, attrs=None) -> _shared_frame.RegionFrame:
+    """Execute a sequential body within its own lexical allocation scope."""
+    return region("tirx.scope", [], attrs=attrs)
+
+
 def compute_scope(name: str, *, attrs=None, body_params=None) -> _shared_frame.RegionFrame:
     """Outline the body as a named CPU compute helper."""
     return region("tirx.compute_scope", [name], attrs=attrs, body_params=body_params)
@@ -820,6 +825,7 @@ __all__ = [
     "region",
     "resolve_global_info_",
     "return_",
+    "scope",
     "serial",
     "set_mutable_cell_",
     "setattr_",

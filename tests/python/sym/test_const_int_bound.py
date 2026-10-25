@@ -90,13 +90,36 @@ def test_plain_var_non_negative_bound_requires_context():
     assert analyzer.const_int_bound(var).min_value == NEG_INF
 
 
+@pytest.mark.parametrize("operation", [tvm_tirx.ir.prim.BitwiseOr, tvm_tirx.ir.prim.BitwiseXor])
+@pytest.mark.parametrize(
+    "left_bound,right_bound", [((0, 3), (0, 3)), ((3, 5), (1, 7)), ((0, 15), (0, 1))]
+)
+def test_bitwise_bounds_cover_nonmonotone_operands(operation, left_bound, right_bound):
+    left = tvm_tirx.ir.Var("left", "int64")
+    right = tvm_tirx.ir.Var("right", "int64")
+    analyzer = tvm_tirx.sym.Analyzer()
+    analyzer.update(left, ConstIntBound(*left_bound))
+    analyzer.update(right, ConstIntBound(*right_bound))
+    bounds = analyzer.const_int_bound(operation(left, right))
+    assert bounds.min_value == 0
+    assert bounds.max_value < POS_INF
+    for left_value in range(left_bound[0], left_bound[1] + 1):
+        for right_value in range(right_bound[0], right_bound[1] + 1):
+            result = (
+                left_value | right_value
+                if operation is tvm_tirx.ir.prim.BitwiseOr
+                else left_value ^ right_value
+            )
+            assert bounds.min_value <= result <= bounds.max_value
+
+
 class TestCastBound(BaseCompare):
     x = tvm_tirx.tirx.Var("x", "int8")
     tmod = tvm_tirx.tirx.truncmod
 
     @pytest.fixture(
         params=[
-            TestCase(tmod(x, 3).astype("uint32"), (0, 2)),
+            TestCase(tmod(x, 3).astype("uint32"), (0, 2**32 - 1)),
             TestCase(tmod(x, 3).astype("float32").astype("int32"), (-2, 2)),
         ],
         scope="session",

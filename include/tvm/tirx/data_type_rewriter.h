@@ -18,11 +18,11 @@
  */
 
 /*!
- * \file data_type_rewriter.h
+ * \file tvm/tirx/data_type_rewriter.h
  * \brief Rewrite the data type of expressions.
  */
-#ifndef TVM_TIRX_IR_DATA_TYPE_REWRITER_H_
-#define TVM_TIRX_IR_DATA_TYPE_REWRITER_H_
+#ifndef TVM_TIRX_DATA_TYPE_REWRITER_H_
+#define TVM_TIRX_DATA_TYPE_REWRITER_H_
 
 #include <tvm/tirx/stmt_functor.h>
 
@@ -45,7 +45,7 @@ namespace tirx {
  * inconsistency may happen as a result of IR mutation in some passes. This class can be used as
  * base class of such passes to ensure the consistency of data types.
  */
-class DataTypeLegalizer : public StmtExprMutator {
+class TVM_TIRX_DLL DataTypeLegalizer : public StmtExprMutator {
  public:
   TVM_DEFINE_OBJECT_FUNCTOR_DEFAULT_CONSTRUCTOR(DataTypeLegalizer, StmtExprMutator)
   using StmtExprMutator::Mutate;
@@ -97,7 +97,7 @@ class DataTypeLegalizer : public StmtExprMutator {
  * expression is a tensor index or a conditional expression, which can be used in the sub-classes to
  * implement different rewriting rules.
  */
-class IndexDataTypeRewriter : public DataTypeLegalizer {
+class TVM_TIRX_DLL IndexDataTypeRewriter : public DataTypeLegalizer {
  public:
   TVM_DEFINE_OBJECT_FUNCTOR_DEFAULT_CONSTRUCTOR(IndexDataTypeRewriter, DataTypeLegalizer)
   using DataTypeLegalizer::Mutate;
@@ -137,7 +137,7 @@ class IndexDataTypeRewriter : public DataTypeLegalizer {
  * assumes the specified data type is large enough to hold the original ranges of tensor shapes and
  * indices.
  */
-class IndexDataTypeNormalizer : public IndexDataTypeRewriter {
+class TVM_TIRX_DLL IndexDataTypeNormalizer : public IndexDataTypeRewriter {
  public:
   using IndexDataTypeRewriter::Mutate;
   using IndexDataTypeRewriter::Mutate_;
@@ -161,4 +161,4 @@ class IndexDataTypeNormalizer : public IndexDataTypeRewriter {
 }  // namespace tirx
 }  // namespace tvm
 
-#endif  // TVM_TIRX_IR_DATA_TYPE_REWRITER_H_
+#endif  // TVM_TIRX_DATA_TYPE_REWRITER_H_

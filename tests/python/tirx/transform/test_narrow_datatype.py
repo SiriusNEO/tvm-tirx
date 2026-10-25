@@ -22,6 +22,62 @@ from tvm_tirx.script import ir as I
 from tvm_tirx.script import tirx as T
 
 
+def test_narrow_pointer_valued_conditional():
+    ir = tvm_tirx.ir
+    pointer = ir.PtrType(ir.PrimType("int32"))
+    first = ir.Var("first", pointer)
+    second = ir.Var("second", pointer)
+    condition = ir.Var("condition", "bool")
+    selected = ir.Var("selected", pointer)
+    function = tvm_tirx.tirx.Function(
+        [first, second, condition],
+        [
+            ir.Bind(selected, ir.Call("prim.if_then_else", [condition, first, second])),
+            ir.Evaluate(ir.Call("tirx.isnullptr", [selected])),
+        ],
+    )
+    module = ir.IRModule({"main": function})
+    narrowed = tvm_tirx.tirx.transform.NarrowDataType(32)(module)
+    assert tvm_tirx.tirx.analysis.check_well_formed(narrowed["main"])
+    ir.assert_structural_equal(narrowed, module)
+
+
+@pytest.mark.parametrize("dtype", ["float4_e2m1fn", "float8_e4m3fn", "float16", "bfloat16"])
+def test_narrow_preserves_floating_conditional_type(dtype):
+    ir = tvm_tirx.ir
+    condition = ir.Var("condition", "bool")
+    value = ir.Var("value", dtype)
+    conditional = ir.Call(
+        "prim.if_then_else", [condition, value, ir.const(0, "int32")], ty=ir.PrimType(dtype)
+    )
+    function = tvm_tirx.tirx.Function([condition, value], [ir.Evaluate(conditional)])
+    rewritten = tvm_tirx.tirx.transform.NarrowDataType(32)(ir.IRModule({"main": function}))
+    result = rewritten["main"].body.seq[0].value
+    assert result.ty == ir.PrimType(dtype)
+    assert result.args[1].ty == result.ty
+    assert result.args[2].ty == result.ty
+    assert tvm_tirx.tirx.analysis.check_well_formed(rewritten)
+
+
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float32", "float64"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_inferred_floating_conditional_does_not_cast_infinity_to_integer(dtype, reverse):
+    ir = tvm_tirx.ir
+    condition = ir.Var("condition", "bool")
+    branches = [ir.const(0, "int32"), ir.const(float("-inf"), dtype)]
+    if reverse:
+        branches.reverse()
+    conditional = ir.Call("prim.if_then_else", [condition, *branches])
+    assert conditional.ty == ir.PrimType(dtype)
+    function = tvm_tirx.tirx.Function([condition], [ir.Evaluate(conditional)])
+    rewritten = tvm_tirx.tirx.transform.NarrowDataType(32)(ir.IRModule({"main": function}))
+    result = rewritten["main"].body.seq[0].value
+    assert result.ty == ir.PrimType(dtype)
+    assert all(branch.ty == result.ty for branch in result.args[1:])
+    assert float(result.args[1 if reverse else 2].value) == float("-inf")
+    assert tvm_tirx.tirx.analysis.check_well_formed(rewritten)
+
+
 def _index_module(m, n, input_dtype, loop_dtype, kind, index_dtype="int32"):
     input_scalar, loop_scalar = getattr(T, input_dtype), getattr(T, loop_dtype)
     shape = input_scalar(m) * input_scalar(n)

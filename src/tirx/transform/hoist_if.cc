@@ -42,6 +42,8 @@ namespace tirx {
 
 class IfHoister : public StmtExprMutator {
  public:
+  explicit IfHoister(bool allow_nontrivial_else) : allow_nontrivial_else_(allow_nontrivial_else) {}
+
   using StmtExprMutator::Mutate;
   using StmtExprMutator::Mutate_;
 
@@ -207,7 +209,7 @@ class IfHoister : public StmtExprMutator {
         auto* loop = scope.loops[destination];
         // Each two-sided predicate doubles the enclosing loop subtree. Limit
         // splitting to once per loop nest, even across code-motion barriers.
-        if (!preserve_else || !split_in_nest_) {
+        if (!preserve_else || (allow_nontrivial_else_ && !split_in_nest_)) {
           // Record at the destination now; its For unwind wraps the complete
           // rewritten body. Preorder collection preserves enclosing predicate order.
           loop->conditions.emplace_back(op->condition, preserve_else);
@@ -227,6 +229,7 @@ class IfHoister : public StmtExprMutator {
 
   // Number of enclosing Ifs with an else; each loop saves its entry baseline.
   int else_depth_{0};
+  bool allow_nontrivial_else_;
   // Active eligible loops across motion boundaries; zero starts a new split budget.
   // Unlike scoped destinations, this stays nonzero inside a nested SeqStmt barrier.
   int active_loops_{0};
@@ -238,11 +241,11 @@ class IfHoister : public StmtExprMutator {
 
 namespace transform {
 
-Pass HoistIf() {
-  auto pass_func = [](Function f, IRModule m, PassContext ctx) {
+Pass HoistIf(bool allow_nontrivial_else) {
+  auto pass_func = [allow_nontrivial_else](Function f, IRModule m, PassContext ctx) {
     if (!f->body.has_value()) return f;
     auto* n = f.CopyOnWrite();
-    Stmt body = ffi::make_object<IfHoister>()
+    Stmt body = ffi::make_object<IfHoister>(allow_nontrivial_else)
                     ->Mutate(n->body.value(), InplaceMode::kAllow)
                     .ValueOrUnchanged(n->body.value());
     n->body = tirx::ConvertSSA(std::move(body));

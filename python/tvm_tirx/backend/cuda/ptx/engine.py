@@ -184,7 +184,7 @@ def _codegen_addr_offset(entry, slot, value) -> tuple[object, int]:
 def _make_codegen(entry: InstructionEntry):
     n_slots = len(entry.slots)
 
-    def codegen(*args):
+    def codegen(*args, attrs=None):
         # Layout: [operands..., pred?] [n_slots tokens] [pred marker]. The token
         # count is fixed per entry, so the tokens are parsed first and the
         # operand layout -- which may depend on them, a register group's length

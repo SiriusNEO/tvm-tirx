@@ -35,14 +35,28 @@ void StmtExprVisitorWithAnalyzer::InitVTable(VTable* vtable) {
 
 ffi::Optional<VisitInterrupt> StmtExprVisitorWithAnalyzer::Visit_(const ForNode* op) {
   return constraint_scope_.WithNewScope([&]() -> ffi::Optional<VisitInterrupt> {
-    analyzer_->Bind(op->var, Range(op->begin, op->end));
     TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->begin));
     TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->end));
     TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->step));
+    bool pure_bounds = SideEffect(op->begin) == CallEffectKind::kPure &&
+                       SideEffect(op->end) == CallEffectKind::kPure &&
+                       SideEffect(op->step) == CallEffectKind::kPure;
+    if (pure_bounds) {
+      if (analyzer_->CanProve(op->step > 0)) analyzer_->Bind(op->var, Range(op->begin, op->end));
+    }
     return constraint_scope_.WithNewScope([&]() -> ffi::Optional<VisitInterrupt> {
-      constraint_scope_.Current().Emplace(analyzer_, op->end > op->begin);
-      PrimExpr extent = Range::GetExtentFromBeginEnd(op->begin, op->end);
-      constraint_scope_.Current().Emplace(analyzer_, extent > IntImm(extent.ty(), 0));
+      if (pure_bounds) {
+        if (analyzer_->CanProve(op->step > 0)) {
+          constraint_scope_.Current().Emplace(analyzer_, op->end > op->begin);
+          constraint_scope_.Current().Emplace(analyzer_, op->end - op->begin > 0);
+        } else if (analyzer_->CanProve(op->step < 0)) {
+          constraint_scope_.Current().Emplace(analyzer_, op->begin > op->end);
+          constraint_scope_.Current().Emplace(analyzer_, op->begin - op->end > 0);
+        }
+        PrimExpr inside = (op->step > 0 && op->var >= op->begin && op->var < op->end) ||
+                          (op->step < 0 && op->var <= op->begin && op->var > op->end);
+        constraint_scope_.Current().Emplace(analyzer_, inside);
+      }
       return this->Visit(op->body);
     });
   });

@@ -149,7 +149,7 @@ class WithGroup {
       auto entry = std::move(entries_.back());
       entries_.pop_back();
       try {
-        entry.reset();  // calls ~With<ContextType>() -> ExitWithScope()
+        delete entry.release();
       } catch (...) {
         if (!unwinding && !first_exc) {
           first_exc = std::current_exception();

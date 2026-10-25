@@ -27,11 +27,10 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/sym/analyzer.h>
+#include <tvm/tirx/data_type_rewriter.h>
 #include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-
-#include "../ir/data_type_rewriter.h"
 
 namespace tvm {
 namespace tirx {

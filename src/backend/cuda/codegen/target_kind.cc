@@ -148,6 +148,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def_option<ffi::Map<ffi::String, ffi::Any>>(tvm::attr::kBackendConfig.name)
       .def_option<ffi::String>("mcpu")
       .def_option<ffi::String>("arch")
+      .def_option<ffi::Array<ffi::String>>("code")
       .def_option<int64_t>("max_shared_memory_per_block")
       .def_option<int64_t>("max_threads_per_block")
       .def_option<int64_t>("thread_warp_size", refl::DefaultValue(32))

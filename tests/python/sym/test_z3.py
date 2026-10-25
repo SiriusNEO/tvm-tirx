@@ -492,6 +492,31 @@ def test_z3_cast_preserves_bounds():
     assert analyzer.can_prove(widened >= -32768, SB)
 
 
+@pytest.mark.parametrize("dtype", ["int8", "uint8"])
+def test_z3_narrow_cast_is_not_injective(dtype):
+    analyzer = Analyzer()
+    _require_z3(analyzer)
+    first = tirx.Var("first", "int32")
+    second = tirx.Var("second", "int32")
+    analyzer.bind(first, tvm_tirx.ir.Range(0, 512))
+    analyzer.bind(second, tvm_tirx.ir.Range(0, 512))
+    with analyzer.constraint_scope(tirx.Cast(dtype, first) == tirx.Cast(dtype, second)):
+        assert not analyzer.can_prove(first == second, SB)
+
+
+@pytest.mark.parametrize(
+    "dtype,value,expected",
+    [("int8", 255, -1), ("uint8", -1, 255), ("bool", 2, 1), ("bool", -2, 1), ("bool", 0, 0)],
+)
+def test_z3_cast_matches_runtime_conversion(dtype, value, expected):
+    analyzer = Analyzer()
+    _require_z3(analyzer)
+    source = tirx.Var("source", "int32")
+    converted = tirx.Cast("int32", tirx.Cast(dtype, source))
+    with analyzer.constraint_scope(source == value):
+        assert analyzer.can_prove(converted == expected, SB)
+
+
 def test_z3_bitwise_and_mask_bound():
     analyzer = Analyzer()
     _require_z3(analyzer)

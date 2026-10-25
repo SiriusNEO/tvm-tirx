@@ -57,6 +57,16 @@ struct FloatSuffixTiesToEven {
 };
 
 TVM_FFI_STATIC_INIT_BLOCK() {
+  OpDef("prim.fabs")
+      .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", DispatchPureExtern<FloatSuffix>);
+  OpDef("prim.isfinite")
+      .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", [](const PrimExpr& expression) {
+        PrimExpr value = expression.as_or_throw<Call>()->args[0].as_or_throw<PrimExpr>();
+        if (!value.ty().MatchesCode(kDLFloat)) {
+          value = prim::cast(value, PrimType::Float(32).WithLanes(value.ty().lanes()));
+        }
+        return !prim::isinf(value) && !prim::isnan(value);
+      });
   OpDef("prim.exp")
       .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", DispatchPureExtern<FloatSuffix>);
 

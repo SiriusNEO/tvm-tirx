@@ -588,6 +588,21 @@ def test_ir_builder_tir_thread():
     assert_structural_equal(ir_actual, func, map_free_vars=True)
 
 
+@pytest.mark.parametrize("thread_tag", ["blockIdx.x", "threadIdx.x"])
+def test_launch_thread_preserves_annotations(thread_tag):
+    with IRBuilder() as builder:
+        with T.function():
+            with T.launch_thread(thread_tag, 32, attrs={"tl.launch_hint": 7}):
+                T.evaluate(0)
+    function = builder.get()
+    launch = function.body.seq[0]
+    assert isinstance(launch, tvm_tirx.ir.RegionStmt)
+    assert launch.op.name == "tirx.launch_thread"
+    assert launch.attrs["tl.launch_hint"] == 7
+    assert tirx.analysis.check_well_formed(function)
+    assert_structural_equal(function, tvm_tirx.ir.load_json(tvm_tirx.ir.save_json(function)))
+
+
 def test_ir_builder_tir_allocate():
     with IRBuilder() as ib:
         with T.function():

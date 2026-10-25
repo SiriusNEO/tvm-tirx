@@ -37,6 +37,8 @@ from .type import (
     TensorRegionType,
     TupleType,
     Type,
+    register_custom_dtype,
+    custom_dtype_storage,
 )
 from .expr import (
     Call,

@@ -786,9 +786,22 @@ class Z3Prover::Impl final : tvm::ExprFunctor<z3::expr(const Expr&)> {
     return Dispatch(op->body);
   }
   z3::expr Dispatch_(const prim::CastNode* op) override {
-    // if the inner dtype is valid, we just visit it
     if (IsZ3SupportedExpr(op->value.get()) && IsZ3SupportedExpr(op)) {
-      return VisitInt(op->value);
+      PrimType source = op->value.ty();
+      PrimType target = op->ty.as_or_throw<PrimType>();
+      z3::expr value = VisitInt(op->value);
+      if (target.MatchesCode(DLDataTypeCode::kDLBool) ||
+          target.MatchesElementType(DLDataTypeCode::kDLInt, 1)) {
+        return value != ctx->int_val(0);
+      }
+      if (source.MatchesCode(DLDataTypeCode::kDLBool) ||
+          (source->dtype.code == target->dtype.code && source.bits() <= target.bits()) ||
+          (source.MatchesCode(DLDataTypeCode::kDLUInt) &&
+           target.MatchesCode(DLDataTypeCode::kDLInt) && source.bits() < target.bits())) {
+        return value;
+      }
+      return z3::bv2int(z3::int2bv(target.bits(), value),
+                        target.MatchesCode(DLDataTypeCode::kDLInt));
     } else {
       // otherwise, we create a new free z3 variable
       return Create(op);

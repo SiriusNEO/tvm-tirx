@@ -53,8 +53,6 @@ class StmtSimplifier : public StmtExprMutatorWithAnalyzer {
 
   UnchangedOr<ffi::Any> Mutate(ffi::AnyView input, InplaceMode inplace_mode) final;
 
-  UnchangedOr<Stmt> Mutate_(const ForNode* op, InplaceMode inplace_mode) final;
-
   UnchangedOr<Stmt> Mutate_(const BindNode* op, InplaceMode inplace_mode) override;
 
   UnchangedOr<Stmt> Mutate_(const IfNode* op, InplaceMode inplace_mode) override;
@@ -114,13 +112,6 @@ UnchangedOr<ffi::Any> StmtSimplifier::Mutate(ffi::AnyView input, InplaceMode inp
     return simplified;
   }
   return Parent::Mutate(input, inplace_mode);
-}
-
-UnchangedOr<Stmt> StmtSimplifier::Mutate_(const ForNode* op, InplaceMode inplace_mode) {
-  analyzer_->Bind(op->var, Range(op->begin, op->end));
-  With<sym::ConstraintContext> ctx1(analyzer_, op->var >= op->begin);
-  With<sym::ConstraintContext> ctx2(analyzer_, static_cast<PrimExpr>(op->var) < op->end);
-  return Parent::Mutate_(op, inplace_mode);
 }
 
 UnchangedOr<Stmt> StmtSimplifier::Mutate_(const BindNode* op, InplaceMode inplace_mode) {

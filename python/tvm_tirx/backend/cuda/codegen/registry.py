@@ -26,6 +26,30 @@ import functools
 import tvm_ffi
 
 CODEGEN_REGISTRY = {}
+DTYPE_CODEGEN_REGISTRY = {}
+
+
+def register_dtype_codegen(dtype, scalar_type: str, source: str):
+    """Register a custom dtype's CUDA C++ value type and its definitions."""
+    from tvm_tirx import ir
+
+    primitive = dtype if isinstance(dtype, ir.PrimType) else ir.PrimType(dtype)
+    ir.custom_dtype_storage(primitive)
+    if primitive.dtype.type_code < 129 or primitive.dtype.lanes != 1:
+        raise ValueError("CUDA custom dtype registration requires a scalar custom dtype")
+    if not scalar_type or not source:
+        raise ValueError("CUDA custom dtype registration requires a type and its source")
+    key = (primitive.dtype.type_code, primitive.dtype.bits)
+    entry = (scalar_type, source)
+    if key in DTYPE_CODEGEN_REGISTRY and DTYPE_CODEGEN_REGISTRY[key] != entry:
+        raise ValueError(f"CUDA custom dtype is already registered: {dtype}")
+    DTYPE_CODEGEN_REGISTRY[key] = entry
+
+
+@tvm_ffi.register_global_func("tirx.intrinsics.cuda.get_dtype_codegen")
+def get_dtype_codegen(dtype):
+    """Look up a custom dtype's CUDA scalar representation."""
+    return list(DTYPE_CODEGEN_REGISTRY[(dtype.type_code, dtype.bits)])
 
 
 @tvm_ffi.register_global_func("tirx.intrinsics.cuda.get_codegen")
@@ -34,15 +58,16 @@ def get_codegen(op):
     return CODEGEN_REGISTRY.get(op, None)
 
 
-def register_codegen(op, backend="cuda"):
+def register_codegen(op, backend="cuda", *, namespace="tirx"):
     """Register a codegen function for a given op.
 
     The codegen function should return a ``func_call`` statement, and
     optionally a list of tags that the codegen function needs.
+    ``namespace`` selects the owning dialect; it defaults to ``tirx``.
     """
 
     def decorator(func):
-        full_op_name = "tirx." + op
+        full_op_name = namespace + "." + op
 
         @functools.wraps(func)
         def wrapper(arg_list, attrs=None):

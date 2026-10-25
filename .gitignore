@@ -13,6 +13,7 @@ __pycache__/
 .Python
 env/
 build/
+/build_cpp/
 build-*/
 !.github/actions/build-*/
 !.github/actions/build-*/action.yml
@@ -274,6 +275,7 @@ tvm-site/
 
 # GDB history file
 .gdb_history
+/build_tilelang_wheel/
 
 # Less command history file
 .lesshst

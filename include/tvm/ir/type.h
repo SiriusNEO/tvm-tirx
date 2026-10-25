@@ -312,6 +312,15 @@ inline bool operator==(const PrimType& lhs, const PrimType& rhs) {
 
 inline bool operator!=(const PrimType& lhs, const PrimType& rhs) { return !(lhs == rhs); }
 
+TVM_TIRX_DLL void RegisterCustomDType(ffi::String name, int code, PrimType storage_type);
+
+TVM_TIRX_DLL PrimType CustomDTypeStorage(PrimType dtype);
+
+inline bool IsCustomDType(PrimType dtype) {
+  return static_cast<int>(dtype.code()) >=
+         static_cast<int>(ffi::DLExtDataTypeCode::kDLExtCustomBegin);
+}
+
 namespace ffi {
 template <>
 inline constexpr bool use_default_type_traits_v<PrimType> = false;

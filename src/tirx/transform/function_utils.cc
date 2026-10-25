@@ -51,6 +51,10 @@ transform::Pass AnnotateEntryFunc() {
     bool has_external_non_functions = false;
     IRModule with_annotations;
     for (const auto& [gvar, base_func] : mod->functions) {
+      if (base_func->GetAttr(tvm::attr::kCallingConv).value_or(CallingConv::kDefault) ==
+          CallingConv::kDeviceKernelLaunch) {
+        continue;
+      }
       bool is_external = base_func->GetAttr(tvm::attr::kGlobalSymbol).has_value();
       if (is_external) {
         if (auto ptr = base_func.as<FunctionNode>()) {

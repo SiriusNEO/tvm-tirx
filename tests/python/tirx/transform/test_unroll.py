@@ -17,11 +17,30 @@
 from __future__ import annotations
 
 import pytest
+import tvm_ffi
 
 import tvm_tirx
 import tvm_tirx.testing
+from tvm_tirx import ir, tirx
 from tvm_tirx.script import ir as I
 from tvm_tirx.script import tirx as T
+
+
+@pytest.mark.parametrize("begin,end,step", [(0, 6, 2), (0, 5, 2), (3, 14, 4), (8, 3, 2)])
+def test_native_unroll_preserves_non_unit_step(begin, end, step):
+    index = ir.Var("index", "int32")
+    output = ir.Var("output", tirx.TensorType([16], "int32"))
+    loop = ir.For(
+        index, begin, end, step, ir.ForKind.UNROLLED, ir.TensorStore(output, [index], index)
+    )
+    module = ir.IRModule({"main": tirx.Function([output], loop)})
+    module = tirx.transform.UnrollLoop()(module)
+    module = tirx.transform.StmtSimplify()(module)
+    stores = []
+    tvm_ffi.structural_walk(module, (ir.TensorStore, lambda node: stores.append(node)))
+    assert [int(store.indices[0]) for store in stores] == list(range(begin, end, step))
+    assert [int(store.value) for store in stores] == list(range(begin, end, step))
+    assert tirx.analysis.check_well_formed(module)
 
 
 @pytest.mark.parametrize("max_step,explicit", [(16, True), (15, True), (16, False)])

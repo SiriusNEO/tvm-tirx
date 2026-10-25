@@ -25,7 +25,7 @@ def test_cast():
     analyzer = tvm_tirx.sym.Analyzer()
     x = tvm_tirx.tirx.Var("x", "int8")
     m = analyzer.modular_set((x * 3).astype("uint32"))
-    assert m.coeff == 3
+    assert m.coeff == 1
     assert m.base == 0
     m = analyzer.modular_set((x * 3 + 1).astype("float32").astype("int32"))
     assert m.coeff == 3
@@ -192,18 +192,16 @@ def test_intersect():
     a = tvm_tirx.tirx.Var("a", "int32")
     analyzer = tvm_tirx.sym.Analyzer()
     tmod = tvm_tirx.tirx.truncmod
-    with analyzer.constraint_scope(tmod(a, 4) == 1):
-        with analyzer.constraint_scope(tmod(a, 3) == 1):
-            m = analyzer.modular_set(a)
-            assert m.coeff == 12
-            assert m.base == 1
+    with analyzer.constraint_scope(tmod(a, 4) == 1), analyzer.constraint_scope(tmod(a, 3) == 1):
+        m = analyzer.modular_set(a)
+        assert m.coeff == 12
+        assert m.base == 1
 
-    with analyzer.constraint_scope(tmod(a, 3) == 2):
-        with analyzer.constraint_scope(tmod(a, 5) == 3):
-            with analyzer.constraint_scope(tmod(a, 7) == 2):
-                m = analyzer.modular_set(a)
-                assert m.coeff == 105
-                assert m.base == 23
+    with analyzer.constraint_scope(tmod(a, 3) == 2), analyzer.constraint_scope(tmod(a, 5) == 3):
+        with analyzer.constraint_scope(tmod(a, 7) == 2):
+            m = analyzer.modular_set(a)
+            assert m.coeff == 105
+            assert m.base == 23
 
 
 def test_let():

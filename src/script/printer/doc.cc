@@ -95,6 +95,24 @@ LiteralDoc::LiteralDoc(ffi::Any value, const ffi::Optional<AccessPath>& object_p
   this->data_ = std::move(n);
 }
 
+ExprDoc LiteralDoc::DataType(DLDataType value, const ffi::Optional<AccessPath>& object_path) {
+  ffi::String name =
+      value == DLDataType{kDLOpaqueHandle, 0, 0} ? "void" : ffi::DLDataTypeToString(value);
+  if (ffi::StringToDLDataType(name) == value) {
+    return LiteralDoc::Str(name, object_path);
+  }
+  ExprDoc result =
+      NamespaceDoc("ir")
+          ->Attr("PrimType")
+          ->Attr("from_dlpack_data_type")
+          ->Call({TupleDoc({LiteralDoc::Int(value.code, std::nullopt),
+                            LiteralDoc::Int(value.bits, std::nullopt),
+                            LiteralDoc::Int(static_cast<int16_t>(value.lanes), std::nullopt)})})
+          ->Attr("dtype");
+  if (object_path.has_value()) result->source_paths.push_back(object_path.value());
+  return result;
+}
+
 ExprStringDoc::ExprStringDoc(ExprDoc value, const ffi::Optional<AccessPath>& object_path) {
   ffi::ObjectPtr<ExprStringDocNode> n = ffi::make_object<ExprStringDocNode>();
   n->value = value;

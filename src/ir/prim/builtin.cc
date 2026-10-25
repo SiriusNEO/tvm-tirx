@@ -45,6 +45,19 @@ Type InferTypeReturnArgType(const CallNode* call) {
   return call->args[N]->ty;
 }
 
+Type InferConditionalType(const CallNode* call) {
+  TVM_FFI_CHECK(call->args.size() == 3, TypeError)
+      << "Conditional selection requires three operands";
+  auto true_value = call->args[1].as<PrimExpr>();
+  auto false_value = call->args[2].as<PrimExpr>();
+  if (true_value && false_value) {
+    return tvm::if_then_else(call->args[0].as_or_throw<PrimExpr>(), *true_value, *false_value,
+                             call->loc)
+        .ty();
+  }
+  return call->args[1]->ty;
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("prim.likely")
       .signature(sig::arg("x", "The input value."))
@@ -56,7 +69,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .signature(sig::arg("condition", "The condition."),
                  sig::arg("true_value", "The value when the condition is true."),
                  sig::arg("false_value", "The value when the condition is false."))
-      .set_native_fn_attr<&InferTypeReturnArgType<1>>(tvm::op_attr::kInferType)
+      .set_native_fn_attr<&InferConditionalType>(tvm::op_attr::kInferType)
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure);
 
   OpDef("prim.vscale")

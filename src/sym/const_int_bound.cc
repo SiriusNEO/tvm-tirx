@@ -31,6 +31,7 @@
 #include <tvm/sym/analyzer.h>
 
 #include <algorithm>
+#include <bit>
 #include <numeric>
 #include <optional>
 
@@ -203,7 +204,38 @@ class ConstIntBoundAnalyzer::Impl final
       a = Dispatch(op->value);
     }
 
-    Entry b = Everything(op->ty.as_or_throw<PrimType>());
+    PrimType target_type = op->ty.as_or_throw<PrimType>();
+    Entry b = Everything(target_type);
+    if (op->value.ty().MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt,
+                                   DLDataTypeCode::kDLBool) &&
+        target_type.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt,
+                                DLDataTypeCode::kDLBool)) {
+      if (target_type.MatchesCode(DLDataTypeCode::kDLBool) ||
+          target_type.MatchesElementType(DLDataTypeCode::kDLInt, 1)) {
+        if (a.min_value > 0 || a.max_value < 0) return MakeBound(1, 1);
+        if (a.min_value == 0 && a.max_value == 0) return MakeBound(0, 0);
+        return MakeBound(0, 1);
+      }
+      if (a.min_value >= b.min_value && a.max_value <= b.max_value) return a;
+      if (a.min_value > kNegInf && a.max_value < kPosInf) {
+        ffi::BigInt modulus = ffi::BigInt(1) << target_type.bits();
+        auto wrap = [&](int64_t value) {
+          ffi::BigInt result = ffi::BigInt(value) & (modulus - 1);
+          if (target_type.MatchesCode(DLDataTypeCode::kDLInt) && result >= (modulus >> 1)) {
+            result -= modulus;
+          }
+          return result;
+        };
+        ffi::BigInt lower = wrap(a.min_value);
+        ffi::BigInt upper = wrap(a.max_value);
+        if (upper - lower == ffi::BigInt(a.max_value) - ffi::BigInt(a.min_value)) {
+          auto lower_bound = lower.as<int64_t>();
+          auto upper_bound = upper.as<int64_t>();
+          if (lower_bound && upper_bound) return MakeBound(*lower_bound, *upper_bound);
+        }
+      }
+      return b;
+    }
     return Intersect(a, b);
   }
 
@@ -518,6 +550,27 @@ class ConstIntBoundAnalyzer::Impl final
       }
       return Everything(op->ty.as_or_throw<PrimType>());
     }
+  }
+
+  Entry NonnegativeBitwiseBound(const PrimExpr& first, const PrimExpr& second,
+                                const PrimType& type) {
+    Entry left = Dispatch(first);
+    Entry right = Dispatch(second);
+    if (left.min_value < 0 || right.min_value < 0 || left.max_value == kPosInf ||
+        right.max_value == kPosInf) {
+      return Everything(type);
+    }
+    uint64_t largest = static_cast<uint64_t>(left.max_value | right.max_value);
+    uint64_t mask = (uint64_t{1} << std::bit_width(largest)) - 1;
+    return Intersect(MakeBound(0, static_cast<int64_t>(mask)), Everything(type));
+  }
+
+  Entry Dispatch_(const prim::BitwiseOrNode* op) final {
+    return NonnegativeBitwiseBound(op->a, op->b, op->ty.as_or_throw<PrimType>());
+  }
+
+  Entry Dispatch_(const prim::BitwiseXorNode* op) final {
+    return NonnegativeBitwiseBound(op->a, op->b, op->ty.as_or_throw<PrimType>());
   }
 
   std::function<void()> EnterConstraint(const PrimExpr& constraint) {

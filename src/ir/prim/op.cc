@@ -301,6 +301,22 @@ PrimExpr min_value(PrimType value_ty, Location loc) {
   TVM_FFI_UNREACHABLE();
 }
 
+static PrimExpr CastIntegerConstant(const IntImmNode* constant, PrimType type) {
+  if (type.MatchesCode(kDLBool) || type.MatchesElementType(kDLInt, 1)) {
+    return IntImm(type, constant->value != 0 ? 1 : 0, constant->loc);
+  }
+  if (type.MatchesCode(kDLInt, kDLUInt)) {
+    TVM_FFI_CHECK_GT(type.bits(), 0, ValueError) << "Integer casts require a positive width";
+    ffi::BigInt modulus = ffi::BigInt(1) << type.bits();
+    ffi::BigInt converted = constant->value & (modulus - 1);
+    if (type.MatchesCode(kDLInt) && converted >= (modulus >> 1)) {
+      converted -= modulus;
+    }
+    return IntImm(type, converted, constant->loc);
+  }
+  return MakeConst(type, constant->value, constant->loc);
+}
+
 PrimExpr cast(PrimExpr value, PrimType t, Location loc) {
   PrimType dtype = t;
   if (value.ty() == dtype) return value;
@@ -308,8 +324,11 @@ PrimExpr cast(PrimExpr value, PrimType t, Location loc) {
       << "Cannot cast an expression with the void sentinel type";
   // const fold IntImm as they are used in index computations
   if (dtype.IsScalar()) {
+    if (IsCustomDType(dtype) || IsCustomDType(value.ty())) {
+      return prim::Cast(std::move(t), value, loc);
+    }
     if (const IntImmNode* op = value.as<IntImmNode>()) {
-      return MakeConst(dtype, op->value, op->loc);
+      return CastIntegerConstant(op, dtype);
     } else if (const FloatImmNode* op = value.as<FloatImmNode>()) {
       return MakeConst(dtype, op->value, op->loc);
     }
@@ -319,8 +338,10 @@ PrimExpr cast(PrimExpr value, PrimType t, Location loc) {
     if (!value.ty().IsScalableVector() && !value.ty().IsFixedLengthVector()) {
       // manually unroll cast
       if (value.ty() != elem_ty) {
-        if (const IntImmNode* op = value.as<IntImmNode>()) {
-          value = MakeConst(elem_ty, op->value, op->loc);
+        if (IsCustomDType(elem_ty) || IsCustomDType(value.ty())) {
+          value = prim::Cast(elem_ty, value, loc);
+        } else if (const IntImmNode* op = value.as<IntImmNode>()) {
+          value = CastIntegerConstant(op, elem_ty);
         } else if (const FloatImmNode* op = value.as<FloatImmNode>()) {
           value = MakeConst(elem_ty, op->value, op->loc);
         } else {
@@ -751,9 +772,13 @@ PrimExpr prim::IntegerAbs(PrimExpr x, Location loc) {
     bool lhs_is_int = args[0].type_index() == ffi::TypeIndex::kTVMFFIInt;                          \
     bool rhs_is_int = args[1].type_index() == ffi::TypeIndex::kTVMFFIInt;                          \
     if (lhs_is_int) {                                                                              \
-      *ret = (Func(args[0].cast<int>(), args[1].cast<PrimExpr>(), args[2].cast<Location>()));      \
+      PrimExpr operand = args[1].cast<PrimExpr>();                                                 \
+      *ret = Func(MakeConst(operand.ty(), args[0].cast<int64_t>()), operand,                       \
+                  args[2].cast<Location>());                                                       \
     } else if (rhs_is_int) {                                                                       \
-      *ret = (Func(args[0].cast<PrimExpr>(), args[1].cast<int>(), args[2].cast<Location>()));      \
+      PrimExpr operand = args[0].cast<PrimExpr>();                                                 \
+      *ret = Func(operand, MakeConst(operand.ty(), args[1].cast<int64_t>()),                       \
+                  args[2].cast<Location>());                                                       \
     } else {                                                                                       \
       *ret = (Func(args[0].cast<PrimExpr>(), args[1].cast<PrimExpr>(), args[2].cast<Location>())); \
     }                                                                                              \

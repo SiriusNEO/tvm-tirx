@@ -25,6 +25,7 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/module.h>
 #include <tvm/ir/prim/op.h>
+#include <tvm/tirx/data_type_rewriter.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/layout.h>
 #include <tvm/tirx/stmt.h>
@@ -36,7 +37,6 @@
 #include <vector>
 
 #include "../../ir/seq_stmt_mutate.h"
-#include "data_type_rewriter.h"
 
 namespace tvm {
 namespace tirx {
@@ -136,11 +136,11 @@ ffi::Optional<VisitInterrupt> StmtExprVisitor::Visit_(const BindNode* op) {
 }
 
 ffi::Optional<VisitInterrupt> StmtExprVisitor::Visit_(const RegionStmtNode* op) {
-  TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->attrs));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->args));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->WithDefRegionKind(
       kTVMFFIDefRegionKindSimple, [&]() { return this->Visit(op->body_params); }));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->body));
+  TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->attrs));
   return this->WithDefRegionKind(kTVMFFIDefRegionKindSimple,
                                  [&]() { return this->Visit(op->result_vars); });
 }
@@ -149,7 +149,8 @@ ffi::Optional<VisitInterrupt> StmtExprVisitor::Visit_(const ForNode* op) {
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->begin));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->end));
   TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->step));
-  return this->Visit(op->body);
+  TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(this->Visit(op->body));
+  return this->Visit(op->annotations);
 }
 
 ffi::Optional<VisitInterrupt> StmtExprVisitor::Visit_(const WhileNode* op) {
@@ -242,12 +243,12 @@ UnchangedOr<Stmt> StmtExprMutator::Mutate_(const BindNode* op, InplaceMode inpla
 }
 
 UnchangedOr<Stmt> StmtExprMutator::Mutate_(const RegionStmtNode* op, InplaceMode inplace_mode) {
-  auto attrs = Mutate(op->attrs, inplace_mode).as_or_throw<UnchangedOr<DictAttrs>>();
   auto args = Mutate(op->args, inplace_mode).as_or_throw<UnchangedOr<ffi::Array<Expr>>>();
   auto body_params = WithDefRegionKind(kTVMFFIDefRegionKindSimple, [&]() {
     return Mutate(op->body_params, inplace_mode).as_or_throw<UnchangedOr<ffi::Array<Var>>>();
   });
   auto body = Mutate(op->body, inplace_mode);
+  auto attrs = Mutate(op->attrs, inplace_mode).as_or_throw<UnchangedOr<DictAttrs>>();
   auto result_vars = WithDefRegionKind(kTVMFFIDefRegionKindSimple, [&]() {
     return Mutate(op->result_vars, inplace_mode).as_or_throw<UnchangedOr<ffi::Array<Var>>>();
   });
@@ -279,8 +280,11 @@ UnchangedOr<Stmt> StmtExprMutator::Mutate_(const ForNode* op, InplaceMode inplac
   auto end = Mutate(op->end, inplace_mode);
   auto step = Mutate(op->step, inplace_mode);
   auto body = Mutate(op->body, inplace_mode);
+  auto annotations =
+      Mutate(op->annotations, inplace_mode).as_or_throw<UnchangedOr<decltype(op->annotations)>>();
   if (begin.UnchangedOrSameAs(op->begin) && end.UnchangedOrSameAs(op->end) &&
-      step.UnchangedOrSameAs(op->step) && body.UnchangedOrSameAs(op->body))
+      step.UnchangedOrSameAs(op->step) && body.UnchangedOrSameAs(op->body) &&
+      annotations.UnchangedOrSameAs(op->annotations))
     return ffi::Unchanged();
   if (inplace_mode == InplaceMode::kAllow) {
     auto* writable = const_cast<ForNode*>(op);
@@ -288,6 +292,7 @@ UnchangedOr<Stmt> StmtExprMutator::Mutate_(const ForNode* op, InplaceMode inplac
     if (!end.IsUnchanged()) writable->end = std::move(end).ValueUnchecked();
     if (!step.IsUnchanged()) writable->step = std::move(step).ValueUnchecked();
     if (!body.IsUnchanged()) writable->body = std::move(body).ValueUnchecked();
+    if (!annotations.IsUnchanged()) writable->annotations = std::move(annotations).ValueUnchecked();
     return ffi::Unchanged();
   }
   auto copy = ffi::make_object<ForNode>(*op);
@@ -295,6 +300,7 @@ UnchangedOr<Stmt> StmtExprMutator::Mutate_(const ForNode* op, InplaceMode inplac
   if (!end.IsUnchanged()) copy->end = std::move(end).ValueUnchecked();
   if (!step.IsUnchanged()) copy->step = std::move(step).ValueUnchecked();
   if (!body.IsUnchanged()) copy->body = std::move(body).ValueUnchecked();
+  if (!annotations.IsUnchanged()) copy->annotations = std::move(annotations).ValueUnchecked();
   return Stmt(std::move(copy));
 }
 
@@ -431,6 +437,19 @@ class IRSubstituteWithDataTypeLegalization : public DataTypeLegalizer {
 
   using DataTypeLegalizer::Mutate;
   using DataTypeLegalizer::Mutate_;
+
+  UnchangedOr<Expr> Mutate_(const CallNode* op, InplaceMode inplace_mode) final {
+    Call call = DataTypeLegalizer::Mutate_(op, inplace_mode)
+                    .ValueOrUnchanged(ffi::GetRef<Expr>(op))
+                    .as_or_throw<Call>();
+    if (call->attrs.has_value()) {
+      auto attrs = Mutate(call->attrs.value(), inplace_mode).as_or_throw<UnchangedOr<Attrs>>();
+      if (!attrs.UnchangedOrSameAs(call->attrs.value())) {
+        call.CopyOnWrite()->attrs = std::move(attrs).ValueUnchecked();
+      }
+    }
+    return call;
+  }
 
   UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode* op, InplaceMode inplace_mode) final {
     auto result = StmtExprMutator::Mutate_(op, InplaceMode::kDisallow);

@@ -68,7 +68,7 @@ size_t GetWgslArrayElementStride(const PrimType& dtype) {
     return 4;
   }
 
-  size_t scalar_bytes = (dtype.bits() + 7) / 8;
+  size_t scalar_bytes = dtype.MatchesCode(kDLInt, kDLUInt, kDLBool) ? 4 : (dtype.bits() + 7) / 8;
   // WGSL arrays use the alignment-rounded size as their element stride.  In
   // particular, a three-lane vector has the same stride as a four-lane vector.
   return scalar_bytes * (lanes == 3 ? 4 : lanes);
@@ -102,6 +102,9 @@ class WebGPUWorkgroupInfoCollector : public StmtExprVisitor {
         call && call->op.same_as(tirx::tensor_data_ptr_op()) && call->args.size() == 1) {
       return call->args[0].as<Var>();
     }
+    if (const auto* call = data.as<CallNode>();
+        call && call->op.same_as(tirx::ptr_byte_offset_op()) && call->args.size() == 2)
+      return GetBufferDataVar(call->args[0]);
     return std::nullopt;
   }
 
@@ -139,7 +142,9 @@ class WebGPUWorkgroupInfoCollector : public StmtExprVisitor {
   }
 
   ffi::Optional<VisitInterrupt> Visit_(const RegionStmtNode* op) final {
-    if (op->op.same_as(tirx::launch_thread_op())) {
+    if (op->op.same_as(tirx::scope_op())) {
+      return StmtExprVisitor::Visit_(op);
+    } else if (op->op.same_as(tirx::launch_thread_op())) {
       TVM_FFI_CHECK(!op->args[0].as_or_throw<StringImm>()->value.starts_with("vthread"), ValueError)
           << "Virtual thread launches must be lowered before code generation";
       ffi::String tag = op->args[0].as_or_throw<StringImm>()->value;
@@ -188,6 +193,7 @@ void CodeGenWebGPU::InitFuncState(const Function& f) {
   CodeGenC::InitFuncState(f);
   analyzer_ = sym::Analyzer();
   workgroup_memory_bytes_ = 0;
+  tensor_views_.clear();
   // analyze the data;
   for (Var arg : f->params) {
     if (arg->ty.as<PtrTypeNode>()) {
@@ -363,7 +369,9 @@ runtime::FunctionInfo CodeGenWebGPU::AddFunction(const Function& f, bool skip_re
 }
 
 void CodeGenWebGPU::Dispatch_(const RegionStmtNode* op) {
-  if (op->op.same_as(tirx::launch_thread_op())) {
+  if (op->op.same_as(tirx::scope_op())) {
+    CodeGenC::Dispatch_(op);
+  } else if (op->op.same_as(tirx::launch_thread_op())) {
     TVM_FFI_CHECK(!op->args[0].as_or_throw<StringImm>()->value.starts_with("vthread"), ValueError)
         << "Virtual thread launches must be lowered before code generation";
     PrimVar var = op->body_params[0].as_or_throw<PrimVar>();
@@ -416,7 +424,9 @@ void CodeGenWebGPU::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(
     os << "vec" << lanes << "<";
   }
 
-  if (t.code() == DLDataTypeCode::kDLFloat) {
+  if (t.MatchesCode(kDLBool)) {
+    os << "bool";
+  } else if (t.code() == DLDataTypeCode::kDLFloat) {
     TVM_FFI_ICHECK(t.bits() == 16 || t.bits() == 32) << "CodeGenWebGPU: only support f16 or f32";
     if (t.bits() == 16) {
       // Using f16 requires enable directive
@@ -425,10 +435,10 @@ void CodeGenWebGPU::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(
     os << "f" << t.bits();
   } else if (t.MatchesCode(DLDataTypeCode::kDLUInt)) {
     TVM_FFI_ICHECK(t.bits() != 64) << "CodeGenWebGPU: do not support u64";
-    os << "u" << t.bits();
+    os << "u32";
   } else if (t.MatchesCode(DLDataTypeCode::kDLInt)) {
     TVM_FFI_ICHECK(t.bits() != 64) << "CodeGenWebGPU: do not support i64";
-    os << "i" << t.bits();
+    os << "i32";
   } else {
     TVM_FFI_THROW(InternalError) << "CodeGenWebGPU: Cannot convert type "
                                  << ffi::DLDataTypeToString(t->dtype) << " to WebGPU type";
@@ -443,7 +453,7 @@ void CodeGenWebGPU::PrintStorageSync(const CallNode* op) {
   if (sync == "warp") {
     this->PrintIndent();
     this->stream << "workgroupBarrier();\n";
-  } else if (sync == "shared") {
+  } else if (sync == "shared" || sync == "shared.dyn") {
     this->PrintIndent();
     this->stream << "workgroupBarrier();\n";
   } else if (sync == "global") {
@@ -462,17 +472,30 @@ void CodeGenWebGPU::PrintSSAAssign(const std::string& target, const std::string&
 
 void CodeGenWebGPU::PrintVecElemLoad(const std::string& vec, const PrimType& t, int i,
                                      std::ostream& os) {  // NOLINT(*)
+  if (t == PrimType::Int(8, 4)) {
+    os << "(bitcast<i32>((" << vec << " >> " << i * 8 << "u) << 24u) >> 24u)";
+    return;
+  }
   os << vec << "[" << i << "]";
 }
 
 void CodeGenWebGPU::PrintVecElemStore(const std::string& vec, const PrimType& t, int i,
                                       const std::string& value) {
   this->PrintIndent();
+  if (t == PrimType::Int(8, 4)) {
+    stream << vec << " = (" << vec << " & ~(255u << " << i * 8 << "u)) | ((u32(" << value
+           << ") & 255u) << " << i * 8 << "u);\n";
+    return;
+  }
   stream << vec << "[" << i << "] = " << value << ";\n";
 }
 
 void CodeGenWebGPU::Dispatch_(const prim::BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
   std::string v = PrintExpr(op->value);
+  if (op->ty.as_or_throw<PrimType>() == PrimType::Int(8, 4)) {
+    os << "((u32(" << v << ") & 255u) * 16843009u)";
+    return;
+  }
   int lanes = op->ty.as_or_throw<PrimType>().lanes();
   PrintType(op->ty.as_or_throw<PrimType>(), os);
   os << "(";
@@ -556,8 +579,56 @@ void CodeGenWebGPU::Dispatch_(const CallNode* op, std::ostream& os) {  // NOLINT
 }
 
 void CodeGenWebGPU::Dispatch_(const prim::CastNode* op, std::ostream& os) {  // NOLINT(*)
-  PrintType(op->ty.as_or_throw<PrimType>(), os);
-  os << "(" << PrintExpr(op->value) << ")";
+  PrimType destination = op->ty.as_or_throw<PrimType>();
+  PrimType source = op->value.ty();
+  std::string value = PrintExpr(op->value);
+  if (destination == source) {
+    os << value;
+    return;
+  }
+  bool packed_destination = destination == PrimType::Int(8, 4);
+  if (packed_destination || source == PrimType::Int(8, 4)) {
+    value = SSAGetID(value, source);
+    if (!packed_destination) PrintType(destination, os);
+    os << '(';
+    for (int lane = 0; lane < 4; ++lane) {
+      if (lane) os << (packed_destination ? " | " : ", ");
+      if (packed_destination) {
+        os << "((u32(i32(";
+        PrintVecElemLoad(value, source, lane, os);
+        os << ")) & 255u) << " << lane * 8 << "u)";
+      } else {
+        bool mask = destination.MatchesCode(kDLUInt) && destination.bits() < 32;
+        if (mask) os << '(';
+        PrintType(destination.WithLanes(1), os);
+        os << '(';
+        PrintVecElemLoad(value, source, lane, os);
+        os << ')';
+        if (mask) os << " & " << ((uint32_t{1} << destination.bits()) - 1) << "u)";
+      }
+    }
+    os << ')';
+    return;
+  }
+  if (destination.MatchesCode(kDLInt, kDLUInt) && destination.bits() < 32) {
+    bool sign = destination.MatchesCode(kDLInt);
+    os << (sign ? "((" : "(");
+    PrintType(destination, os);
+    os << '(' << value << ')' << (sign ? " << " : " & ");
+    PrimType unsigned_type = PrimType::UInt(32, destination.lanes());
+    PrintType(unsigned_type, os);
+    os << '(' << (sign ? 32 - destination.bits() : ((uint32_t{1} << destination.bits()) - 1))
+       << "u)";
+    if (sign) {
+      os << ") >> ";
+      PrintType(unsigned_type, os);
+      os << '(' << 32 - destination.bits() << "u)";
+    }
+    os << ')';
+    return;
+  }
+  PrintType(destination, os);
+  os << "(" << value << ")";
 }
 
 void CodeGenWebGPU::Dispatch_(const prim::SelectNode* op, std::ostream& os) {  // NOLINT(*)
@@ -623,6 +694,11 @@ void CodeGenWebGPU::Dispatch_(const FloatImmNode* op, std::ostream& os) {  // NO
 }
 
 void CodeGenWebGPU::Dispatch_(const TensorLoadNode* op, std::ostream& os) {  // NOLINT(*)
+  auto view = tensor_views_.find(op->source.as_or_throw<Var>().get());
+  if (view != tensor_views_.end() && view->second.byte_arena) {
+    PrintByteArenaLoad(op, os);
+    return;
+  }
   // NOTE: direct impl of load/store for correctness
   // Each printing stmt must stand on their own after all preprocessing steps
   // to ensure correctness in the case of nested-expression
@@ -630,7 +706,7 @@ void CodeGenWebGPU::Dispatch_(const TensorLoadNode* op, std::ostream& os) {  // 
   TVM_FFI_ICHECK_EQ(op->indices.size(), 1) << "Load from non-flat memory not supported.";
 
   PrimType value_ty = op->ty.as_or_throw<PrimType>();
-  PrimExpr index = op->indices[0];
+  PrimExpr index = OffsetTensorIndex(op->source.as_or_throw<Var>(), op->indices[0]);
   Var buffer_var = op->source.as_or_throw<tvm::tirx::TensorVar>();
   const PrimType& element_ty = op->source.as_or_throw<tvm::tirx::TensorVar>().dtype();
 
@@ -707,11 +783,16 @@ void CodeGenWebGPU::Dispatch_(const BindNode* op) {
 }
 
 void CodeGenWebGPU::Dispatch_(const TensorStoreNode* op) {
+  auto view = tensor_views_.find(op->dest.as_or_throw<Var>().get());
+  if (view != tensor_views_.end() && view->second.byte_arena) {
+    PrintByteArenaStore(op);
+    return;
+  }
   TVM_FFI_ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
 
   PrimType value_ty = op->value.ty();
   const PrimType& element_ty = op->dest.as_or_throw<TensorVar>().dtype();
-  PrimExpr index = op->indices[0];
+  PrimExpr index = OffsetTensorIndex(op->dest.as_or_throw<Var>(), op->indices[0]);
   Var buffer_var = op->dest.as_or_throw<TensorVar>();
 
   std::string buffer_vid = GetVarID(buffer_var.get());
@@ -767,18 +848,29 @@ void CodeGenWebGPU::Dispatch_(const TensorStoreNode* op) {
 }
 
 void CodeGenWebGPU::DispatchDeclTensor(const BindNode* op, const CallNode* buffer_call) {
-  Expr data = buffer_call->args[0];
-  const VarNode* source = data.as<VarNode>();
-  if (const auto* call = data.as<CallNode>();
-      call && call->op.same_as(tirx::tensor_data_ptr_op()) && call->args.size() == 1) {
-    source = call->args[0].as<VarNode>();
+  TensorView view = ResolveTensorView(buffer_call->args[0]);
+  PrimType dtype = op->var->ty.as_or_throw<TensorType>()->dtype;
+  if (!view.byte_arena) {
+    PrimType storage_type =
+        view.storage->ty.as<TensorTypeNode>()
+            ? view.storage->ty.as_or_throw<TensorType>()->dtype
+            : view.storage->ty.as_or_throw<PtrType>()->element_type.as_or_throw<PrimType>();
+    TVM_FFI_CHECK(dtype == storage_type, TypeError)
+        << "WebGPU tensor reinterpretation requires a packed byte arena";
+    PrimExpr stride = prim::MakeConst(view.byte_offset.ty(), GetWgslArrayElementStride(dtype));
+    TVM_FFI_CHECK(analyzer_->CanProveEqual(prim::FloorMod(view.byte_offset, stride), 0), ValueError)
+        << "WebGPU tensor view byte offset must be aligned to its array element stride";
+  } else {
+    PrimExpr alignment = prim::MakeConst(view.byte_offset.ty(), dtype.WithLanes(1).StorageBytes());
+    TVM_FFI_CHECK(analyzer_->CanProveEqual(prim::FloorMod(view.byte_offset, alignment), 0),
+                  ValueError)
+        << "WebGPU byte arena view must be aligned to its scalar element type";
   }
-  TVM_FFI_CHECK(source && var_idmap_.count(source), ValueError)
-      << "WebGPU tensor views require a named storage array";
   // WGSL storage is an array, not a C pointer. Preserve its physical element
   // representation and access mode by sharing the existing array name.
   TVM_FFI_ICHECK(!var_idmap_.count(op->var.get()));
-  var_idmap_[op->var.get()] = GetVarID(source);
+  var_idmap_[op->var.get()] = GetVarID(view.storage.get());
+  tensor_views_.insert_or_assign(op->var.get(), std::move(view));
 }
 
 void CodeGenWebGPU::DispatchAllocTensor(const BindNode* op, const CallNode* buffer_call) {
@@ -811,7 +903,9 @@ void CodeGenWebGPU::DispatchAllocTensor(const BindNode* op, const CallNode* buff
     constant_size *= static_cast<size_t>(dim_size);
   }
 
-  size_t element_stride = GetWgslArrayElementStride(PrimType(dtype));
+  bool byte_arena =
+      (scope == scope_shared || scope == scope_shared_dyn) && PrimType(dtype) == PrimType::UInt(8);
+  size_t element_stride = byte_arena ? 1 : GetWgslArrayElementStride(PrimType(dtype));
   TVM_FFI_ICHECK_LE(constant_size, std::numeric_limits<size_t>::max() / element_stride)
       << "WebGPU allocation byte size is too large to represent";
   size_t allocation_bytes = constant_size * element_stride;
@@ -837,8 +931,13 @@ void CodeGenWebGPU::DispatchAllocTensor(const BindNode* op, const CallNode* buff
         << " bytes. If the adapter supports this allocation, set "
            "max_shared_memory_per_block in the WebGPU target configuration.";
     this->decl_stream << "var<workgroup> " << vid << " : array<";
-    PrintType(PrimType(dtype), this->decl_stream);
-    this->decl_stream << ", " << constant_size << ">;\n";
+    if (byte_arena) {
+      decl_stream << "atomic<u32>, " << (constant_size + 3) / 4 << ">;\n";
+      tensor_views_.insert_or_assign(buffer.get(), TensorView{buffer, IntImm::Int32(0), true});
+    } else {
+      PrintType(PrimType(dtype), this->decl_stream);
+      this->decl_stream << ", " << constant_size << ">;\n";
+    }
   } else if (scope == scope_local) {
     this->PrintIndent();
     this->stream << "var " << vid << " : array<";

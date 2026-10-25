@@ -32,6 +32,7 @@
 
 #include <cstddef>
 #include <string>
+#include <unordered_map>
 
 #include "../../../codegen/c/codegen_c.h"
 
@@ -91,6 +92,17 @@ class CodeGenWebGPU final : public CodeGenC {
   void Dispatch_(const ContinueNode* op) final;
 
  private:
+  struct TensorView {
+    Var storage;
+    PrimExpr byte_offset;
+    bool byte_arena;
+  };
+  TensorView ResolveTensorView(const Expr& data);
+  PrimExpr OffsetTensorIndex(const Var& buffer, const PrimExpr& index);
+  std::string ByteArenaAddress(const Var& buffer, const std::string& index, int lane);
+  void PrintByteArenaLoad(const TensorLoadNode* node, std::ostream& output);
+  void PrintByteArenaStore(const TensorStoreNode* node);
+  std::unordered_map<const VarNode*, TensorView> tensor_views_;
   sym::Analyzer analyzer_;
 
   /*!

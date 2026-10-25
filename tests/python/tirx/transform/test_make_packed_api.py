@@ -115,7 +115,7 @@ def test_target_host_removed():
             )
             A_type_index: T.let[T.int32] = T.abi_field_get(args, 0, 13, ty="int32")
             assert (
-                A_type_index == 0 or A_type_index == 4 or A_type_index == 7 or A_type_index >= 64
+                A_type_index == 0 or A_type_index == 4 or A_type_index == 7 or A_type_index == 70
             ), (
                 "TypeError",
                 [
@@ -194,7 +194,7 @@ def test_target_host_removed():
             )
             dev_id: T.let[T.int32] = T.abi_field_get(A_handle, 0, 9, ty="int32")
             with T.device_context(2, dev_id):
-                if not T.isnullptr(main_A_strides):
+                if not T.isnullptr(main_A_strides) and T.Not(T.bool(False)):
                     assert T.bool(True), (
                         "ValueError",
                         [
@@ -933,7 +933,7 @@ def test_linear_shape_binding():
             )
             A_type_index: T.let[T.int32] = T.abi_field_get(args, 0, 13, ty=T.int32)
             assert (
-                A_type_index == 0 or A_type_index == 4 or A_type_index == 7 or A_type_index >= 64
+                A_type_index == 0 or A_type_index == 4 or A_type_index == 7 or A_type_index == 70
             ), (
                 "TypeError",
                 [
@@ -1030,7 +1030,9 @@ def test_linear_shape_binding():
                 T.abi_field_get(main_A_shape, 0, 17, ty=T.int64) - T.int64(3), T.int64(4)
             )
             with T.device_context(1, dev_id):
-                if not T.isnullptr(main_A_strides):
+                if not T.isnullptr(main_A_strides) and T.Not(
+                    T.int64(4) * n + T.int64(3) == T.int64(0)
+                ):
                     assert T.int64(4) * n + T.int64(3) == T.int64(1) or T.int64(
                         1
                     ) == T.abi_field_get(main_A_strides, 0, 17, ty=T.int64), (
@@ -1134,7 +1136,7 @@ def test_strides_and_linear_layout_offset():
     assert "T.int64(4)) == T.int64(0)" in offset_check
     assert "divisible" in offset_check
     assert 'm: T.let[T.int64] = T.Div(T.Cast("int64", T.Div(' in script
-    assert "T.uint64(4))), T.int64(4))" in script
+    assert "* T.uint64(8), T.uint64(32))), T.int64(4))" in script
     assert 'offset={"m": T.int64(4) * m}' in script
 
 
@@ -1194,7 +1196,7 @@ def test_forward_reference_symbolic_variable():
             )
             A_type_index: T.let[T.int32] = T.abi_field_get(args, 0, 13, ty="int32")
             assert (
-                A_type_index == 0 or A_type_index == 4 or A_type_index == 7 or A_type_index >= 64
+                A_type_index == 0 or A_type_index == 4 or A_type_index == 7 or A_type_index == 70
             ), (
                 "TypeError",
                 [
@@ -1213,7 +1215,7 @@ def test_forward_reference_symbolic_variable():
             )
             B_type_index: T.let[T.int32] = T.abi_field_get(args, 1, 13, ty="int32")
             assert (
-                B_type_index == 0 or B_type_index == 4 or B_type_index == 7 or B_type_index >= 64
+                B_type_index == 0 or B_type_index == 4 or B_type_index == 7 or B_type_index == 70
             ), (
                 "TypeError",
                 [
@@ -1353,7 +1355,7 @@ def test_forward_reference_symbolic_variable():
                 ],
             )
             with T.device_context(1, dev_id):
-                if not T.isnullptr(main_A_strides):
+                if not T.isnullptr(main_A_strides) and T.Not(batch_size + T.int64(1) == T.int64(0)):
                     assert batch_size + T.int64(1) == T.int64(1) or T.int64(1) == T.abi_field_get(
                         main_A_strides, 0, 17, ty="int64"
                     ), (
@@ -1408,7 +1410,7 @@ def test_forward_reference_symbolic_variable():
                         " bytes",
                     ],
                 )
-                if not T.isnullptr(main_B_strides):
+                if not T.isnullptr(main_B_strides) and T.Not(batch_size == T.int64(0)):
                     assert batch_size == T.int64(1) or T.int64(1) == T.abi_field_get(
                         main_B_strides, 0, 17, ty="int64"
                     ), (
@@ -1588,7 +1590,7 @@ def test_tensor_alignment_attached_to_tensor_var():
             )
             A_type_index: T.let[T.int32] = T.abi_field_get(args, 0, 13, ty="int32")
             assert (
-                A_type_index == 0 or A_type_index == 4 or A_type_index == 7 or A_type_index >= 64
+                A_type_index == 0 or A_type_index == 4 or A_type_index == 7 or A_type_index == 70
             ), (
                 "TypeError",
                 [
@@ -1667,7 +1669,7 @@ def test_tensor_alignment_attached_to_tensor_var():
             )
             dev_id: T.let[T.int32] = T.abi_field_get(A_handle, 0, 9, ty="int32")
             with T.device_context(1, dev_id):
-                if not T.isnullptr(main_A_strides):
+                if not T.isnullptr(main_A_strides) and T.Not(T.bool(False)):
                     assert 1 == T.Cast(
                         "int32", T.abi_field_get(main_A_strides, 0, 17, ty="int64")
                     ), (

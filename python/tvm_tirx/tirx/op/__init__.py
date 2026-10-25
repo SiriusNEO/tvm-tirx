@@ -884,19 +884,21 @@ def gpu_thread_invariant(cond, *, ty=None, loc: Location = UNKNOWN_LOC):
     return call_intrin("tirx.gpu_thread_invariant", cond, loc=loc, ty=ty)
 
 
-def gpu_storage_sync(storage_scope, *, ty=None, loc: Location = UNKNOWN_LOC):
+def gpu_storage_sync(storage_scope, *participants, ty=None, loc: Location = UNKNOWN_LOC):
     """Synchronize accesses in the specified storage scope.
 
     Parameters
     ----------
     storage_scope : str
         The storage scope to synchronize.
+    participants : Expr, optional
+        A warp participation mask, or a named barrier identifier and optional thread count.
     ty : tvm_tirx.ir.Type or str, optional
         The result type. Inferred as void when omitted.
     loc : tvm_tirx.ir.Location, optional
         The source location.
     """
-    return call_intrin("tirx.gpu_storage_sync", storage_scope, loc=loc, ty=ty)
+    return call_intrin("tirx.gpu_storage_sync", storage_scope, *participants, loc=loc, ty=ty)
 
 
 def cpu_parallel_barrier(*, ty=None, loc: Location = UNKNOWN_LOC):

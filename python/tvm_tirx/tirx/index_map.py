@@ -19,7 +19,7 @@
 
 import collections
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Optional
 
 import tvm_ffi
@@ -65,7 +65,7 @@ class IndexMap(tvm_ffi.Object):
         ndim: int | None = None,
         inverse_index_map: Callable | Optional["IndexMap"] = None,
         *,
-        index_dtype: str = "int64",
+        index_dtype: str | Sequence[str] = "int64",
     ):
         """Create an index map from a function
 
@@ -94,8 +94,8 @@ class IndexMap(tvm_ffi.Object):
             It is the user's responsibility to ensure the correctness of the pre-defined inverse
             index map.
 
-        index_dtype : str
-            The default index dtype to use for input iters in the mapping function.
+        index_dtype : str or Sequence[str]
+            The index dtype for all input iterators, or one dtype per iterator.
 
         Returns
         -------
@@ -115,13 +115,13 @@ class IndexMap(tvm_ffi.Object):
                 inspect.Parameter.POSITIONAL_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
             ]:
-                args.append(tvm_tirx.tirx.Var(name, index_dtype))
+                args.append(name)
 
             elif param.kind == inspect.Parameter.VAR_POSITIONAL:
                 var_arg_name = name
 
             elif param.kind == inspect.Parameter.KEYWORD_ONLY:
-                kwargs[name] = tvm_tirx.tirx.Var(name, index_dtype)
+                kwargs[name] = None
 
             else:
                 raise ValueError("transform_layout mapping may not have *args")
@@ -132,12 +132,25 @@ class IndexMap(tvm_ffi.Object):
         if var_arg_name is not None:
             assert ndim is not None, "ndim must be specified when *args is used"
             num_var_args = ndim - len(args) - len(kwargs)
-            for i in range(num_var_args):
-                args.append(tvm_tirx.tirx.Var(f"{var_arg_name}_{i}", index_dtype))
+            for axis in range(num_var_args):
+                args.append(f"{var_arg_name}_{axis}")
+
+        initial_names = args + list(kwargs)
+        dtypes = (
+            [index_dtype] * len(initial_names)
+            if isinstance(index_dtype, str)
+            else list(index_dtype)
+        )
+        if len(dtypes) != len(initial_names):
+            raise ValueError("index_dtype must provide one dtype per input iterator")
+        initial_indices = [
+            tvm_tirx.tirx.Var(name, dtype) for name, dtype in zip(initial_names, dtypes)
+        ]
+        positional_count = len(args)
+        args = initial_indices[:positional_count]
+        kwargs = dict(zip(kwargs, initial_indices[positional_count:]))
 
         mapping = mapping_function(*args, **kwargs)
-
-        initial_indices = args + list(kwargs.values())
 
         final_indices = []
 

@@ -239,6 +239,19 @@ class TensorFlattener : public StmtExprMutatorWithAnalyzer {
     return VisitTensorAccess(std::move(load), op->source.as_or_throw<TensorVar>());
   }
 
+  UnchangedOr<Expr> Mutate_(const TensorRegionNode* op, InplaceMode inplace_mode) final {
+    TensorVar original = op->source.as_or_throw<TensorVar>();
+    tensors_used_.insert(original);
+    const FlatInfo& info = Lookup(original);
+    auto regions = Mutate(op->region, inplace_mode)
+                       .as_or_throw<UnchangedOr<ffi::Array<Range>>>()
+                       .ValueOrUnchanged(op->region);
+    auto flattened_regions = MapTensorRegionBounds(
+        regions, ffi::GetRef<sym::Analyzer>(analyzer_),
+        [&](const ffi::Array<PrimExpr>& indices) { return FoldIndices(info, indices); });
+    return TensorRegion(info.flattened, std::move(flattened_regions), op->ty, op->loc);
+  }
+
   UnchangedOr<Expr> Mutate_(const CallNode* op, InplaceMode inplace_mode) final {
     if (op->op.same_as(masked_load_op()) || op->op.same_as(masked_store_op())) {
       bool is_load = op->op.same_as(masked_load_op());

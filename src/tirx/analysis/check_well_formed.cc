@@ -28,6 +28,7 @@
 #include <tvm/ir/scope_stack.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
+#include <tvm/tirx/index_map.h>
 #include <tvm/tirx/layout.h>
 #include <tvm/tirx/stmt_functor.h>
 
@@ -35,6 +36,7 @@
 #include <optional>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -103,6 +105,7 @@ class WellFormednessVerifier : public StmtExprVisitor {
     StmtExprVisitor::SetDispatch<WellFormednessVerifier, IRModuleNode>(table);
     StmtExprVisitor::SetDispatch<WellFormednessVerifier, FunctionNode>(table);
     StmtExprVisitor::SetDispatch<WellFormednessVerifier, LambdaExprNode>(table);
+    StmtExprVisitor::SetDispatch<WellFormednessVerifier, IndexMapNode>(table);
   }
 
   Result Visit(ffi::AnyView value) override {
@@ -305,7 +308,10 @@ class WellFormednessVerifier : public StmtExprVisitor {
       for (size_t i = 0; i < op->params.size(); ++i) {
         if (op->params[i].as<TensorVar>()) Define(op->params[i], params->ArrayItem(i));
       }
-      return WithScope([&]() { return this->Visit(op->body); });
+      return WithScope([&]() -> Result {
+        this->Visit(op->body);
+        return this->Visit(op->attrs);
+      });
     });
     loop_depth_ = enclosing_depth;
     if (check_ == Check::kTensors) {
@@ -318,7 +324,7 @@ class WellFormednessVerifier : public StmtExprVisitor {
   Result Visit_(const VarNode* op) override {
     auto var = ffi::GetRef<Var>(op);
     if (check_ == Check::kVariables) {
-      auto verify = Verify(current_.count(var));
+      auto verify = Verify(current_.count(var) || metadata_variables_.count(op));
       verify << "ValueError: Invalid use of undefined variable " << var->name
              << " at <current location>.";
       if (auto it = previous_.find(var); it != previous_.end()) {
@@ -326,6 +332,17 @@ class WellFormednessVerifier : public StmtExprVisitor {
                << ", this definition is no longer in-scope.";
       }
     }
+    return std::nullopt;
+  }
+
+  Result Visit_(const IndexMapNode* op) {
+    auto outer_variables = metadata_variables_;
+    for (const PrimVar& variable : op->initial_indices) {
+      metadata_variables_.insert(variable.get());
+    }
+    this->Visit(op->final_indices);
+    this->Visit(op->inverse_index_map);
+    metadata_variables_ = std::move(outer_variables);
     return std::nullopt;
   }
 
@@ -351,13 +368,13 @@ class WellFormednessVerifier : public StmtExprVisitor {
 
   Result Visit_(const RegionStmtNode* op) override {
     this->Visit(op->args);
-    this->Visit(op->attrs);
     for (const auto& param : op->body_params) this->Visit(param->ty);
     WithScope([&]() -> Result {
       for (size_t i = 0; i < op->body_params.size(); ++i) {
         Define(op->body_params[i], AccessPath::Root()->Attr("body_params")->ArrayItem(i), false);
       }
-      return this->Visit(op->body);
+      this->Visit(op->body);
+      return this->Visit(op->attrs);
     });
     for (size_t i = 0; i < op->result_vars.size(); ++i) {
       Define(op->result_vars[i], AccessPath::Root()->Attr("result_vars")->ArrayItem(i));
@@ -377,7 +394,10 @@ class WellFormednessVerifier : public StmtExprVisitor {
     }
     return WithScope([&]() -> Result {
       Define(op->var, AccessPath::Root()->Attr("var"));
-      return WithScope([&]() { return this->Visit(op->body); });
+      return WithScope([&]() -> Result {
+        this->Visit(op->body);
+        return this->Visit(op->annotations);
+      });
     });
   }
 
@@ -492,6 +512,7 @@ class WellFormednessVerifier : public StmtExprVisitor {
   ScopeStack<std::vector<std::pair<Var, DefinitionSite>>> scopes_;
   std::unordered_map<Var, DefinitionSite> current_;
   std::unordered_map<Var, DefinitionSite> previous_;
+  std::unordered_set<const VarNode*> metadata_variables_;
 };
 
 auto WellFormednessVerifier::Visit_(const TensorLoadNode* op) -> Result {

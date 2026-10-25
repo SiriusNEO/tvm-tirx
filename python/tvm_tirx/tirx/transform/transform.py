@@ -154,11 +154,28 @@ def VectorizeLoop(enable_vectorize: bool = True):
     return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
 
 
-def StorageRewrite():
+def StorageRewrite(
+    enable_reuse: bool = True,
+    detect_inplace: bool = True,
+    preserve_shared_allocations: bool = False,
+    allow_local_inplace: bool = False,
+):
     """Plan storage by moving allocations and reusing compatible storage.
 
     Hoists allocations where valid and shares storage when lifetimes and
     memory-scope allocation properties permit it.
+
+    Parameters
+    ----------
+    enable_reuse : bool
+        Allow lifetime-based reuse of compatible storage.
+    detect_inplace : bool
+        Allow compatible input and output storage to share an allocation.
+    preserve_shared_allocations : bool
+        Leave shared allocations in place for a downstream storage planner.
+    allow_local_inplace : bool
+        With detect_inplace, permit verified in-place updates in flat local
+        storage without enabling lifetime reuse or packing in that scope.
 
     Returns
     -------
@@ -205,7 +222,9 @@ def StorageRewrite():
 
         tvm.ir.assert_structural_equal(run_pass(), Expected)
     """
-    return _ffi_api.StorageRewrite()  # type: ignore
+    return _ffi_api.StorageRewrite(
+        enable_reuse, detect_inplace, preserve_shared_allocations, allow_local_inplace
+    )
 
 
 def PointerValueTypeRewrite():
@@ -330,8 +349,13 @@ def RemoveNoOp():
     return _ffi_api.RemoveNoOp()  # type: ignore
 
 
-def HoistIf():
+def HoistIf(allow_nontrivial_else: bool = True):
     """Hoist loop-invariant If statements outside eligible loops.
+
+    Parameters
+    ----------
+    allow_nontrivial_else : bool
+        Whether to permit duplicating a loop to preserve its false path.
 
     Returns
     -------
@@ -368,7 +392,7 @@ def HoistIf():
 
         tvm.ir.assert_structural_equal(run_pass(), Expected)
     """
-    return _ffi_api.HoistIf()
+    return _ffi_api.HoistIf(allow_nontrivial_else)
 
 
 def BF16ComputeLegalize():
@@ -831,6 +855,16 @@ def MakePackedAPI():
         tvm.ir.assert_structural_equal(run_pass(), Expected)
     """
     return _ffi_api.MakePackedAPI()  # type: ignore
+
+
+def OutlineDeviceRegions():
+    """Outline device regions while preserving ordinary calls to the new functions."""
+    return _ffi_api.OutlineDeviceRegions()
+
+
+def LowerDeviceKernelLaunch():
+    """Lower outlined device calls after device-specific storage transformations."""
+    return _ffi_api.LowerDeviceKernelLaunch()
 
 
 def SplitHostDevice():

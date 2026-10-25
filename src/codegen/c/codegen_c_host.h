@@ -57,7 +57,21 @@ class CodeGenCHost : public CodeGenC {
 
   using CodeGenC::PrintType;
   void PrintType(const PrimType& t, std::ostream& os) override;  // NOLINT(*)
-  void PrintFuncPrefix(std::ostream& os) final;                  // NOLINT(*)
+  void PrintStorageType(const Type& type, std::ostream& os) override;
+  std::string CastFromTo(std::string value, const PrimType& from, const PrimType& target) override;
+  void PrintVecConstructor(const PrimType& type, std::ostream& output) override;
+  void PrintVecBinaryOp(const std::string& operation, const PrimType& type, PrimExpr lhs,
+                        PrimExpr rhs, std::ostream& output) override;
+  void PrintVecElemLoad(const std::string& value, const PrimType& type, int index,
+                        std::ostream& output) override;
+  void PrintVecElemStore(const std::string& value, const PrimType& type, int index,
+                         const std::string& element) override;
+  void PrintVecElemLoadExpr(const PrimType& type, int index, const std::string& value,
+                            std::ostream& output) override;
+  void Dispatch_(const prim::RampNode* node, std::ostream& output) override;
+  void Dispatch_(const prim::NotNode* node, std::ostream& output) override;
+  void Dispatch_(const prim::SelectNode* node, std::ostream& output) override;
+  void PrintFuncPrefix(std::ostream& os) final;  // NOLINT(*)
 
   // overload visitor functions
   void Dispatch_(const prim::BroadcastNode* op, std::ostream& os) final;  // NOLINT(*)
@@ -68,10 +82,13 @@ class CodeGenCHost : public CodeGenC {
   void Dispatch_(const prim::MaxNode* op, std::ostream& os) final;  // NOLINT(*)
 
   void Dispatch_(const AssertStmtNode* op) final;  // NOLINT(*)
+  void Dispatch_(const ForNode* op) final;
 
   void GenerateForwardFunctionDeclarations(ffi::String global_symbol,
                                            const ffi::Array<Type>& arg_types,
                                            const Type& ret_type) override;
+  void PrintCallExtern(Type ret_type, ffi::String global_symbol, const ffi::Array<Expr>& args,
+                       bool skip_first_arg, std::ostream& os) override;
   ffi::Array<ffi::String> GetFunctionNames() { return function_names_; }
 
  protected:
@@ -91,10 +108,12 @@ class CodeGenCHost : public CodeGenC {
   bool emit_fwd_func_decl_;
   /*! \brief whether to generate the entry function if encountered */
   bool has_main_func_ = false;
+  std::unordered_set<const ForNode*> parallel_chain_;
+  std::unordered_set<std::string> vector_types_;
 
   std::string GetPackedName(const CallNode* op);
   void PrintGetFuncFromBackend(const std::string& func_name, const std::string& packed_func_name);
-  void PrintCallPacked(const CallNode* op);
+  std::string PrintCallPacked(const CallNode* op);
   /*!
    * \brief Print ternary conditional operator implementing binary `op`
    * Forces the operands to be in SSA form.

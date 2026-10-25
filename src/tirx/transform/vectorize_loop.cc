@@ -480,6 +480,11 @@ class Vectorizer : public StmtExprMutator {
     VarRemapSet(var_, ramp_);
   }
 
+  Stmt Run(const Stmt& body, InplaceMode inplace_mode) {
+    Stmt result = Mutate(body, inplace_mode).ValueOrUnchanged(body);
+    return scalarize_binding_scope_ ? Scalarize(body) : result;
+  }
+
   // Rewriting may change vector dtypes and later request scalarization of the
   // original statement.  Keep the complete speculative traversal out of place.
   UnchangedOr<ffi::Any> Mutate(ffi::AnyView value, InplaceMode inplace_mode) final {
@@ -488,6 +493,10 @@ class Vectorizer : public StmtExprMutator {
       auto result = StmtExprMutator::Mutate(value, InplaceMode::kDisallow);
       if (need_scalarize_) {
         need_scalarize_ = false;
+        if (stmt->IsInstance<BindNode>()) {
+          scalarize_binding_scope_ = true;
+          return ffi::Unchanged();
+        }
         return ffi::Any(Scalarize(ffi::GetRef<Stmt>(stmt)));
       }
       return result;
@@ -791,8 +800,49 @@ class Vectorizer : public StmtExprMutator {
   }
   // Call
   UnchangedOr<Expr> Mutate_(const CallNode* op, InplaceMode inplace_mode) final {
+    if (op->op.same_as(prim::assume_op())) {
+      PrimExpr predicate = op->args[0].as_or_throw<PrimExpr>();
+      if (SideEffect(predicate) > CallEffectKind::kPure) {
+        need_scalarize_ = true;
+        return ffi::Unchanged();
+      }
+      predicate = Mutate(predicate, inplace_mode).ValueOrUnchanged(predicate);
+      if (predicate.ty().IsScalableVector()) {
+        need_scalarize_ = true;
+        return ffi::Unchanged();
+      }
+      if (!predicate.ty().IsScalar()) {
+        PrimExpr conjunction = prim::Shuffle::ExtractElement(predicate, 0);
+        for (int lane = 1; lane < predicate.ty().lanes(); ++lane) {
+          conjunction = conjunction && prim::Shuffle::ExtractElement(predicate, lane);
+        }
+        predicate = conjunction;
+      }
+      return Call(op->ty, op->op, {predicate}, op->attrs, op->ty_args, op->loc);
+    }
+    auto rule = Op::HasAttrMap(op_attr::kVectorizeCall)
+                    ? Op::GetAttrMap(op_attr::kVectorizeCall).get(op->op, nullptr)
+                    : nullptr;
+    if (rule != nullptr) {
+      ffi::TypedFunction<Expr(Expr)> rewrite(
+          [self = ffi::GetObjectPtr<Vectorizer>(this)](Expr operand) {
+            return self->Mutate(operand).ValueOrUnchanged(operand);
+          });
+      auto result =
+          rule(ffi::GetRef<Call>(op), var_.as_or_throw<PrimVar>(), var_lanes_, rewrite, target_);
+      if (!result) {
+        need_scalarize_ = true;
+        return ffi::Unchanged();
+      }
+      return result.value();
+    }
     auto optional_ret_ty = op->ty.as<PrimType>();
     if (!optional_ret_ty) {
+      if (Op::GetAttrMap(tvm::op_attr::kCallEffectKind).get(op->op, CallEffectKind::kOpaque) >
+          CallEffectKind::kPure) {
+        need_scalarize_ = true;
+        return ffi::Unchanged();
+      }
       // Non-primitive calls are not vectorized themselves.  Visit their general Expr operands
       // to preserve pointer values and rewrite scalar values, scalarizing the surrounding
       // statement if rewriting produces a vector operand.
@@ -846,6 +896,11 @@ class Vectorizer : public StmtExprMutator {
                         !ret_ty.IsScalableVector();
 
     if (!vectorizable) {
+      if (Op::GetAttrMap(tvm::op_attr::kCallEffectKind).get(op->op, CallEffectKind::kOpaque) >
+          CallEffectKind::kPure) {
+        need_scalarize_ = true;
+        return ffi::Unchanged();
+      }
       // Cannot vectorize this op
       ffi::Array<Expr> new_args;
       for (const Expr& arg : op->args) {
@@ -1157,7 +1212,8 @@ class Vectorizer : public StmtExprMutator {
     // we need to scalarize the let
     if (need_scalarize_) {
       need_scalarize_ = false;
-      return Scalarize(ffi::GetRef<Stmt>(op));
+      scalarize_binding_scope_ = true;
+      return ffi::Unchanged();
     }
     TVM_FFI_ICHECK(VarRemapGet(op->var) == nullptr)
         << "SSA violation, a single var is binded twice";
@@ -1178,17 +1234,20 @@ class Vectorizer : public StmtExprMutator {
   // scalarize the statment
   Stmt Scalarize(Stmt stmt) {
     PrimType var_ty = var_->ty.as_or_throw<PrimType>();
-    Var idx(var_->name + ".s", var_ty);
-    auto substituter = ffi::make_object<StmtExprMutator>();
-    substituter->VarRemapSet(var_, idx);
-    stmt = substituter->Mutate(stmt).ValueOrUnchanged(stmt);
-    return For(idx.as_or_throw<PrimVar>(), IntImm(var_ty, 0), var_lanes_, IntImm(var_ty, 1),
-               ForKind::kDefault, stmt);
+    PrimVar scalar_index(var_->name + ".s", var_ty);
+    stmt = SubstituteWithDataTypeLegalization(stmt,
+                                              [&](const Var& variable) -> ffi::Optional<PrimExpr> {
+                                                if (variable.same_as(var_)) return scalar_index;
+                                                return std::nullopt;
+                                              });
+    return For(scalar_index, IntImm(var_ty, 0), var_lanes_, IntImm(var_ty, 1), ForKind::kDefault,
+               stmt);
   }
 
  private:
   // analyzer
   sym::Analyzer analyzer_;
+  bool scalarize_binding_scope_{false};
   // deep equal
   prim::ExprDeepEqual deep_equal_;
   // variable to be replaced
@@ -1391,9 +1450,7 @@ class LoopVectorizer : public StmtExprMutator {
             << "Failed to vectorize loop with extent " << extent << " for target " << target_;
       }
       Stmt body = PreserveUnrollPolicy(op->body, op->annotations);
-      return ffi::make_object<Vectorizer>(op->var, extent, target_)
-          ->Mutate(body, inplace_mode)
-          .ValueOrUnchanged(body);
+      return ffi::make_object<Vectorizer>(op->var, extent, target_)->Run(body, inplace_mode);
     } else {
       return StmtExprMutator::Mutate_(op, inplace_mode);
     }

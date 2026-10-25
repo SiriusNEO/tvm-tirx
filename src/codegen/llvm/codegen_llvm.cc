@@ -572,6 +572,7 @@ int CodeGenLLVM::NativeVectorBits(const runtime::MemoryScope& storage_scope) con
 unsigned CodeGenLLVM::GetGlobalAddressSpace() const { return 0; }
 
 llvm::Type* CodeGenLLVM::DTypeToLLVMType(const PrimType& dtype) const {
+  if (IsCustomDType(dtype)) return DTypeToLLVMType(CustomDTypeStorage(dtype));
   if (dtype.IsVoid()) {
     return t_void_;
   }
@@ -887,8 +888,13 @@ void CodeGenLLVM::CreateSerialFor(llvm::Value* begin, llvm::Value* end, llvm::Va
   var_map_[loop_var.get()] = loop_value;
 
   PrimType loop_var_type = loop_var.ty();
-  auto lt = CreateLT(loop_var_type, loop_value, end);
-  builder_->CreateCondBr(lt, for_body, for_end, md_very_likely_branch_);
+  auto* zero = llvm::ConstantInt::get(stride->getType(), 0);
+  auto* forward = builder_->CreateAnd(CreateLT(loop_var_type, zero, stride),
+                                      CreateLT(loop_var_type, loop_value, end));
+  auto* backward = builder_->CreateAnd(CreateLT(loop_var_type, stride, zero),
+                                       CreateLT(loop_var_type, end, loop_value));
+  builder_->CreateCondBr(builder_->CreateOr(forward, backward), for_body, for_end,
+                         md_very_likely_branch_);
   builder_->SetInsertPoint(for_body);
   EmitDebugLocation(body->loc);
 
@@ -1527,6 +1533,9 @@ void CodeGenLLVM::Scalarize(const PrimExpr& e, std::function<void(int i, llvm::V
 llvm::Value* CodeGenLLVM::Dispatch_(const VarNode* op) { return GetVarValue(op); }
 
 llvm::Value* CodeGenLLVM::Dispatch_(const prim::CastNode* op) {
+  TVM_FFI_CHECK(!IsCustomDType(op->value.ty()) && !IsCustomDType(op->ty.as_or_throw<PrimType>()),
+                ValueError)
+      << "Custom dtype casts require a backend numeric lowering";
   return CreateCast(PrimType(op->value.ty()->dtype),
                     PrimType(op->ty.as_or_throw<PrimType>()->dtype), MakeValue(op->value));
 }
@@ -1557,6 +1566,8 @@ llvm::Value* CodeGenLLVM::Dispatch_(const IntImmNode* op) {
 }
 
 llvm::Value* CodeGenLLVM::Dispatch_(const FloatImmNode* op) {
+  TVM_FFI_CHECK(!IsCustomDType(op->ty.as_or_throw<PrimType>()), ValueError)
+      << "Custom dtype constants require a backend numeric lowering";
   return llvm::ConstantFP::get(DTypeToLLVMType(PrimType(op->ty.as_or_throw<PrimType>()->dtype)),
                                op->value);
 }
@@ -2123,7 +2134,12 @@ void CodeGenLLVM::Dispatch_(const TensorStoreNode* op) {
 
 void CodeGenLLVM::Dispatch_(const ForNode* op) {
   EmitDebugLocation(op);
-  analyzer_->Bind(op->var, Range(op->begin, op->end));
+  TVM_FFI_CHECK(!IsZero(op->step), ValueError) << "For loop step must be nonzero";
+  if (SideEffect(op->begin) == CallEffectKind::kPure &&
+      SideEffect(op->end) == CallEffectKind::kPure &&
+      SideEffect(op->step) == CallEffectKind::kPure && analyzer_->CanProve(op->step > 0)) {
+    analyzer_->Bind(op->var, Range(op->begin, op->end));
+  }
   if (op->kind == ForKind::kUnrolled) {
     LOG(WARNING) << "Unroll hint get ignore at CodeGenLLVM backend, "
                  << " consider set unroll_explicit=True";
@@ -2156,12 +2172,10 @@ void CodeGenLLVM::Dispatch_(const WhileNode* op) {
 
 void CodeGenLLVM::Dispatch_(const ReturnNode* op) {
   EmitDebugLocation(op);
-  auto const* val = op->value.as<IntImmNode>();
-  TVM_FFI_ICHECK(val) << "Return should be transformed to return zero "
-                      << "before LLVM code generation.";
-  TVM_FFI_ICHECK_EQ(val->value, 0)
-      << "Return should be transformed to return zero before LLVM code generation.";
-  builder_->CreateRet(ConstInt32(0));
+  llvm::Value* value = MakeValue(op->value);
+  TVM_FFI_CHECK(value->getType() == function_->getReturnType(), TypeError)
+      << "Return value does not match the lowered function return type";
+  builder_->CreateRet(value);
   // LLVM allows exactly one terminator in a basic block. Append a dummy block
   // so code generation can continue after the return statement.
   llvm::BasicBlock* ret_dummy =
@@ -2217,7 +2231,9 @@ void CodeGenLLVM::DispatchAllocTensor(const BindNode* op, const CallNode* buffer
   tvm::Tuple shape = tvm::Tuple(buffer_call->ty_args[0].as_or_throw<tirx::TensorType>()->shape);
   DLDataType dtype = buffer_call->ty_args[0].as_or_throw<tirx::TensorType>()->dtype->dtype;
   TensorVar buffer = op->var.as_or_throw<TensorVar>();
-  DictAttrs annotations = buffer_call->attrs.as_or_throw<DictAttrs>();
+  DictAttrs annotations = buffer_call->attrs.has_value()
+                              ? buffer_call->attrs.value().as_or_throw<DictAttrs>()
+                              : DictAttrs(ffi::Map<ffi::String, ffi::Any>{});
   EmitDebugLocation(op);
   TVM_FFI_ICHECK_EQ(shape->fields.size(), 1)
       << "LLVM codegen only supports flat 1-d buffer allocation, but allocation of " << buffer->name
@@ -2281,7 +2297,7 @@ void CodeGenLLVM::Dispatch_(const RegionStmtNode* op) {
     With<sym::ConstraintContext> thread_scope(analyzer_, var >= 0 && var < extent);
     this->Dispatch(op->body);
     var_map_.erase(var.get());
-  } else if (op->op.same_as(tirx::device_context_op()) ||
+  } else if (op->op.same_as(tirx::scope_op()) || op->op.same_as(tirx::device_context_op()) ||
              op->op.same_as(tirx::compute_scope_op()) ||
              op->op.same_as(tirx::parallel_launch_op())) {
     this->Dispatch(op->body);

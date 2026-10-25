@@ -31,6 +31,21 @@ from . import _ffi_api
 from .base import Node, Scriptable
 
 
+def register_custom_dtype(name: str, code: int, storage_dtype) -> None:
+    """Register a custom dtype identity and its native physical storage type.
+
+    The storage type determines ABI size, not numeric conversion semantics.
+    Custom operations and conversions remain the responsibility of the backend.
+    """
+    storage = storage_dtype if isinstance(storage_dtype, PrimType) else PrimType(storage_dtype)
+    _ffi_api.RegisterCustomDType(name, code, storage)
+
+
+def custom_dtype_storage(dtype) -> "PrimType":
+    """Return a dtype's physical storage type, preserving its lane encoding."""
+    return _ffi_api.CustomDTypeStorage(dtype if isinstance(dtype, PrimType) else PrimType(dtype))
+
+
 @tvm_ffi.register_object("ir.Type")
 class Type(Node, Scriptable):
     """The base class of all types.
@@ -120,6 +135,11 @@ class PrimType(Type):
 
     def __init__(self, dtype):
         self.__init_handle_by_constructor__(_ffi_api.PrimType, dtype)
+
+    @staticmethod
+    def from_dlpack_data_type(encoding: tuple[int, int, int]) -> "PrimType":
+        """Construct a type without losing nonstandard storage widths in dtype names."""
+        return PrimType(tvm_ffi.dtype.from_dlpack_data_type(encoding))
 
     def __call__(self, expr=None):
         """Create a fresh variable, or convert a primitive expression to this type."""

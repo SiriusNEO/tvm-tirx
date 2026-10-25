@@ -81,6 +81,29 @@ def test_ptx_registration():
         assert entry.op_name in CODEGEN_REGISTRY, entry.name
 
 
+@pytest.mark.parametrize(
+    "name", ["cp.async.commit_group", "cp.async.wait_group", "mbarrier.init.shared.b64"]
+)
+@pytest.mark.parametrize("with_metadata", [False, True])
+def test_ptx_codegen_accepts_native_call_attributes(name, with_metadata):
+    from tvm_tirx import ir
+    from tvm_tirx.backend.cuda.codegen.registry import get_codegen
+    from tvm_tirx.backend.cuda.ptx import PTXNamespace
+
+    operands = []
+    if name == "cp.async.wait_group":
+        operands = [0]
+    elif name == "mbarrier.init.shared.b64":
+        operands = [ir.Var("barrier", ir.PtrType("uint64", "shared")), 32]
+    call = PTXNamespace()[name](*operands)
+    lower = get_codegen(call.op.name)
+    expected, expected_tags = lower(list(call.args))
+    attributes = ir.DictAttrs({"tl.access_mask": ir.const(3)} if with_metadata else {})
+    actual, actual_tags = lower(list(call.args), attributes)
+    ir.assert_structural_equal(actual, expected)
+    assert actual_tags == expected_tags
+
+
 def test_ptx_prefetch_codegen():
     @T.function
     def kernel(A: T.Tensor((32,), "float32")):

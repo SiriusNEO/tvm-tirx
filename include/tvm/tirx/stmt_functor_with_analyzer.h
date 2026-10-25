@@ -95,6 +95,8 @@ class TVM_TIRX_DLL StmtExprMutatorWithAnalyzer : public StmtExprMutator {
   explicit StmtExprMutatorWithAnalyzer(sym::AnalyzerObj* analyzer)
       : StmtExprMutatorWithAnalyzer(analyzer, GlobalVTable()) {}
 
+  UnchangedOr<Stmt> Mutate_(const SeqStmtNode* op, InplaceMode inplace_mode) override;
+
   // override functions that need to populate the context information.
   UnchangedOr<Stmt> Mutate_(const ForNode* op, InplaceMode inplace_mode) override;
   UnchangedOr<Stmt> Mutate_(const BindNode* op, InplaceMode inplace_mode) override;

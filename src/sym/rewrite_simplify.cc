@@ -1127,6 +1127,10 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::FloorModNode*
   }
 
   if (IsIndexTypedExpr(op)) {
+    TVM_TRY_REWRITE_IF(
+        floormod(floormod(x, c1), c2), floormod(x, c2),
+        c1.Eval()->value != 0 && c2.Eval()->value != 0 && c1.Eval()->value % c2.Eval()->value == 0);
+
     // Be-aware of the division rules: we use floordiv/floormod here
     TVM_TRY_REWRITE_IF(floormod(x * c1, c2), floormod(x * floormod(c1, c2), c2),
                        c2.Eval()->value != 0);
@@ -1135,6 +1139,11 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::FloorModNode*
                        c1.Eval()->value > 0 && c2.Eval()->value > 0 &&
                            c2.Eval()->value % c1.Eval()->value == 0 &&
                            CanProveEqual(floordiv(y.Eval(), c1.Eval()), 0));
+
+    TVM_TRY_REWRITE_IF(floormod(x * c1 + y + z, c2), floormod(x, floordiv(c2, c1)) * c1 + y + z,
+                       c1.Eval()->value > 0 && c2.Eval()->value > 0 &&
+                           c2.Eval()->value % c1.Eval()->value == 0 &&
+                           CanProveEqual(floordiv(y.Eval() + z.Eval(), c1.Eval()), 0));
 
     TVM_TRY_REWRITE_IF(floormod(x * c1 + y, c2), floormod(x * floormod(c1, c2) + y, c2),
                        c2.Eval()->value > 0 && c1.Eval()->value % c2.Eval()->value == 0);
@@ -1150,6 +1159,10 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::FloorModNode*
     TVM_TRY_REWRITE_IF(floormod(x * c1, x * c2), x * floormod(c1, c2), c2.Eval()->value != 0);
 
     TVM_TRY_REWRITE(MatchesOneOf(floormod(x * y, y), floormod(y * x, y)), ZeroWithTypeLike(y));
+
+    TVM_TRY_REWRITE_IF(MatchesOneOf(floormod(x * z + y, z), floormod(z * x + y, z),
+                                    floormod(y + x * z, z), floormod(y + z * x, z)),
+                       floormod(y, z), CanProveGreaterEqual(z.Eval(), 1));
 
     // x = ay + b, then (ay + b + (ny - ay - b) % y) % y -> (b + (-b) % y) % y -> 0
     TVM_TRY_REWRITE_IF(
@@ -2333,6 +2346,20 @@ UnchangedOr<PrimExpr> RewriteSimplifier::Impl::Mutate_(const prim::CastNode* op,
   PrimExpr ret =
       SimplifierBase::Mutate_(op, inplace_mode).ValueOrUnchanged(ffi::GetRef<PrimExpr>(op));
   op = ret.as<prim::CastNode>();
+  if (const auto* inner = op->value.as<prim::CastNode>();
+      inner && inner->value.ty().IsScalar() && inner->value.ty().MatchesCode(kDLInt, kDLUInt) &&
+      inner->ty.as_or_throw<PrimType>().IsScalar() &&
+      inner->ty.as_or_throw<PrimType>().MatchesCode(kDLInt, kDLUInt)) {
+    PrimType intermediate = inner->ty.as_or_throw<PrimType>();
+    auto bounds = analyzer_->const_int_bound(inner->value);
+    if (bounds->min_value > ConstIntBound::kNegInf && bounds->max_value < ConstIntBound::kPosInf &&
+        ffi::BigInt(bounds->min_value) >=
+            prim::min_value(intermediate).as_or_throw<IntImm>()->value &&
+        ffi::BigInt(bounds->max_value) <=
+            prim::max_value(intermediate).as_or_throw<IntImm>()->value) {
+      return prim::cast(inner->value, ret.ty());
+    }
+  }
   return prim::cast(op->value, ret.ty());
 }
 

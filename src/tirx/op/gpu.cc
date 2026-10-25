@@ -99,7 +99,8 @@ const Op& gpu_storage_sync_op() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tirx.gpu_storage_sync")
-      .signature(sig::arg<StringImm>("storage_scope", "The storage scope."))
+      .signature(sig::arg<StringImm>("storage_scope", "The storage scope."),
+                 sig::var_args<IntExpr>("participants", "A warp mask or named-barrier operands."))
       .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void())
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque);
 }

@@ -31,6 +31,20 @@ from tvm_tirx.tirx import truncdiv as tdiv
 from tvm_tirx.tirx import truncmod as tmod
 
 
+@pytest.mark.parametrize("reverse_product", [False, True])
+@pytest.mark.parametrize("reverse_sum", [False, True])
+def test_symbolic_radix_modulo_discards_complete_rows(reverse_product, reverse_sum):
+    row = tvm_tirx.ir.Var("row", "int32")
+    column = tvm_tirx.ir.Var("column", "int32")
+    radix = tvm_tirx.ir.Var("radix", "int32")
+    product = radix * row if reverse_product else row * radix
+    offset = column + product if reverse_sum else product + column
+    analyzer = tvm_tirx.sym.Analyzer()
+    with analyzer.constraint_scope(radix > 0):
+        actual = analyzer.simplify(flm(offset, radix))
+        tvm_tirx.ir.assert_structural_equal(actual, flm(column, radix))
+
+
 class TestCase:
     def __init__(self, before, expected, preconditions=None):
         if isinstance(before, tirx.expr.EqualOp):

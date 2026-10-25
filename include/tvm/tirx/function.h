@@ -70,18 +70,17 @@ class FunctionNode : public BaseFuncNode {
   bool SEqual(const FunctionNode* other,
               ffi::TypedFunction<bool(AnyView, AnyView, bool, AnyView)> equal) const {
     // `ty` is derived from the signature; compare its source fields directly.
-    return equal(attrs, other->attrs, false, "attrs") &&
-           equal(params, other->params, true, "params") &&
+    return equal(params, other->params, true, "params") &&
            equal(ret_type, other->ret_type, false, "ret_type") &&
-           equal(body, other->body, false, "body");
+           equal(body, other->body, false, "body") && equal(attrs, other->attrs, false, "attrs");
   }
 
   int64_t SHash(int64_t init_hash, ffi::TypedFunction<int64_t(AnyView, int64_t, bool)> hash) const {
     int64_t hash_value = init_hash;
-    hash_value = hash(attrs, hash_value, false);
     hash_value = hash(params, hash_value, true);
     hash_value = hash(ret_type, hash_value, false);
     hash_value = hash(body, hash_value, false);
+    hash_value = hash(attrs, hash_value, false);
     return hash_value;
   }
 
@@ -130,7 +129,8 @@ class Function : public BaseFunc {
  * \brief Renew variable definitions and remap their uses in a function.
  *
  * Definition regions follow the registered structural hooks. Free variables
- * and function attributes are preserved, and the function signature is rebuilt.
+ * are preserved, attribute references follow renewed definitions, and the function signature
+ * is rebuilt.
  *
  * \param func The function to renew.
  * \return The function with fresh variable definitions.

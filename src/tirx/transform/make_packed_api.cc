@@ -94,6 +94,12 @@ class ReturnRewriter : public StmtExprMutator {
   ConvertedInfo ConvertForFFI(Expr val) {
     ConvertedInfo info{-1, val};
 
+    if (const auto* tuple = val.as<TupleNode>(); tuple && tuple->fields.empty()) {
+      info.type_index = ffi::TypeIndex::kTVMFFINone;
+      info.expr = IntImm::Int64(0);
+      return info;
+    }
+
     // convert val's data type to FFI data type, return type code
     if (val->ty.as<PtrTypeNode>()) {
       info.type_index = ffi::TypeIndex::kTVMFFIOpaquePtr;
@@ -253,10 +259,25 @@ Function MakePackedAPI(Function func) {
   // The device context
   PrimVar device_id("dev_id");
   IntImm device_type(PrimType::Int(32), target_device_type);
+  auto nullable_parameters =
+      func->GetAttr<ffi::Array<Var>>("tirx.nullable_params").value_or(ffi::Array<Var>{});
+  if (!nullable_parameters.empty()) {
+    std::unordered_set<const VarNode*> used;
+    for (const Var& variable : UndefinedVars(func_ptr->body.value())) used.insert(variable.get());
+    for (const Var& parameter : nullable_parameters) {
+      TVM_FFI_CHECK(!used.count(parameter.get()), ValueError)
+          << "Nullable tensor parameter " << parameter->name << " has data uses";
+    }
+  }
 
   // Create TVMFFIABIBuilder and decode all packed args
-  TVMFFIABIBuilder binder(name_hint, func_ptr->params, v_packed_args, v_num_packed_args,
-                          device_type, device_id.as_or_throw<PrimExpr>());
+  TVMFFIABIBuilder binder(
+      name_hint, func_ptr->params, v_packed_args, v_num_packed_args, device_type,
+      device_id.as_or_throw<PrimExpr>(),
+      func->GetAttr<ffi::Map<Var, PrimType>>("tirx.packed_storage_dtypes")
+          .value_or(ffi::Map<Var, PrimType>{}),
+      nullable_parameters,
+      func->GetAttr<ffi::Array<Var>>("tirx.required_metadata").value_or(ffi::Array<Var>{}));
   binder.DecodeAllParams();
 
   auto result = binder.Finalize();
@@ -317,6 +338,12 @@ Function MakePackedAPI(Function func) {
       << " are used, but are not passed in as API arguments";
 
   func_ptr->ret_type = PrimType::Int(32);
+
+  auto attributes = func_ptr->attrs->dict;
+  attributes.erase("tirx.nullable_params");
+  attributes.erase("tirx.required_metadata");
+  attributes.erase("tirx.packed_storage_dtypes");
+  func_ptr->attrs = DictAttrs(attributes);
 
   // return the function.
   return func;

@@ -46,6 +46,43 @@ def test_index_mapping():
     assert_structural_equal(index_map.map_indices([T.int64(42)]), [T.int64(10), T.int64(2)])
 
 
+@pytest.mark.parametrize("dtypes", [("int32", "int32"), ("int64", "int64"), ("int32", "int64")])
+@pytest.mark.parametrize("inverse_dtype", [None, "int32", "int64"])
+def test_index_map_script_preserves_types(dtypes, inverse_dtype):
+    from tvm_tirx.script.printer.scriptable import PrinterConfig, _script
+
+    row, column = [Var(name, dtype) for name, dtype in zip(("row", "column"), dtypes)]
+    inverse = None
+    if inverse_dtype is not None:
+        inverse = IndexMap.from_func(
+            lambda offset: (offset // 8, offset % 8), index_dtype=inverse_dtype
+        )
+    mapping = IndexMap([row, column], [row * 8 + column], inverse)
+    source = _script(mapping, PrinterConfig())
+    restored = eval(source, {"T": T})
+    assert_structural_equal(restored, mapping)
+
+
+def test_index_map_script_without_inputs():
+    from tvm_tirx.script.printer.scriptable import PrinterConfig, _script
+
+    mapping = IndexMap([], [T.int32(4)], None)
+    restored = eval(_script(mapping, PrinterConfig()), {"T": T})
+    assert_structural_equal(restored, mapping)
+
+
+def test_index_map_per_axis_types_with_variadic_and_keyword_inputs():
+    def mapping(row, *columns, offset):
+        return [row, *columns, offset]
+
+    dtypes = ["int32", "int64", "int32", "uint32"]
+    index_map = IndexMap.from_func(mapping, ndim=4, index_dtype=dtypes)
+    assert [str(index.ty) for index in index_map.initial_indices] == dtypes
+    assert_structural_equal(index_map.initial_indices, index_map.final_indices)
+    with pytest.raises(ValueError, match="one dtype per input iterator"):
+        IndexMap.from_func(mapping, ndim=4, index_dtype=["int32"])
+
+
 def test_map_indices_accepts_external_analyzer():
     tile = tvm_tirx.tirx.Var("tile", "int32")
     index_map = IndexMap.from_func(lambda i: [i // tile], index_dtype="int32")

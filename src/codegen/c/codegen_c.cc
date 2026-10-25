@@ -22,6 +22,7 @@
  */
 #include "codegen_c.h"
 
+#include <tvm/codegen/codegen.h>
 #include <tvm/ffi/cast.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/function.h>
@@ -39,6 +40,7 @@
 #include <tvm/tirx/type.h>
 
 #include <cctype>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 
@@ -51,6 +53,22 @@ using namespace tvm::prim;
 using namespace tirx;
 
 void CodeGenC::Init(bool output_ssa) { print_ssa_form_ = output_ssa; }
+
+void CodeGenC::ConfigureModule(const IRModule& mod) {
+  emit_line_directives_ = mod->GetAttr(attr::kEmitLineDirectives).value_or(false);
+  source_preamble_ = mod->GetAttr(attr::kPreamble).value_or("");
+}
+
+void CodeGenC::EmitLocation(const Location& loc) {
+  if (!emit_line_directives_) return;
+  if (const auto* callsite = loc.as<CallSiteLocNode>()) {
+    EmitLocation(callsite->callee);
+  } else if (const auto* source = loc.as<SourceLocNode>(); source && source->start_line > 0) {
+    stream << "#line " << source->start_line << " ";
+    PrintEscapedCString(source->source_name->name, stream);
+    stream << "\n";
+  }
+}
 
 void CodeGenC::InitFuncState(const Function& f) {
   thread_extents_.clear();
@@ -102,6 +120,20 @@ void CodeGenC::PrintFunctionSignature(const ffi::String& function_name, const Fu
 }
 
 void CodeGenC::PrintFunctionParameters(const Function& func, std::ostream& os) {
+  std::unordered_set<int64_t> read_only;
+  std::unordered_set<int64_t> non_restrict;
+  for (const IntImm& index : func->GetAttr(attr::kReadOnlyParamIndices).value_or({})) {
+    TVM_FFI_CHECK(index->value >= 0 && index->value < static_cast<int64_t>(func->params.size()),
+                  ValueError)
+        << "Read-only parameter index is out of range";
+    read_only.insert(static_cast<int64_t>(index->value));
+  }
+  for (const IntImm& index : func->GetAttr(attr::kNonRestrictParamIndices).value_or({})) {
+    TVM_FFI_CHECK(index->value >= 0 && index->value < static_cast<int64_t>(func->params.size()),
+                  ValueError)
+        << "Non-restrict parameter index is out of range";
+    non_restrict.insert(static_cast<int64_t>(index->value));
+  }
   os << "(";
   for (size_t i = 0; i < func->params.size(); ++i) {
     tvm::Var v = func->params[i];
@@ -121,6 +153,7 @@ void CodeGenC::PrintFunctionParameters(const Function& func, std::ostream& os) {
     if (is_tensormap_ptr()) {
       os << "const __grid_constant__ CUtensorMap";
     } else {
+      if (v->ty.as<PtrTypeNode>() && read_only.count(i)) os << "const ";
       PrintType(v->ty, os);
     }
 
@@ -130,7 +163,7 @@ void CodeGenC::PrintFunctionParameters(const Function& func, std::ostream& os) {
     if (ptr && ptr->element_type.as<tirx::TensorMapTypeNode>()) {
       is_handle = false;
     }
-    if (no_alias && is_handle) {
+    if (no_alias && is_handle && !non_restrict.count(i)) {
       PrintRestrict(v, os);
     }
 
@@ -192,12 +225,18 @@ void CodeGenC::AddFunction(const GlobalVar& gvar, const Function& f) {
   // If the function has already been forward-declared, this is a
   // no-op.
   DeclareFunction(gvar, f);
+  if (auto source = f->GetAttr(attr::kSource)) {
+    EmitLocation(f->loc);
+    stream << *source << "\n\n";
+    return;
+  }
   if (!f->body.has_value()) return;
   auto function_name = GetFunctionName(gvar);
 
   // clear previous generated state.
   InitFuncState(f);
 
+  EmitLocation(f->loc);
   PrintFunctionSignature(function_name, f, stream);
   stream << " {\n";
   this->PreFunctionBody(f);
@@ -214,6 +253,8 @@ void CodeGenC::PrintExtraAttrs(const Function& f, std::ostream& os) {}
 
 std::string CodeGenC::Finish() {
   std::ostringstream code;
+  code << header_stream_.str();
+  code << source_preamble_ << "\n";
   code << decl_stream.str();
   code << fwd_decl_stream.str();
   code << stream.str();
@@ -277,7 +318,7 @@ std::string CodeGenC::GetBufferRef(const PrimType& t, const VarNode* buffer, Pri
     if (scope.has_value() && IsScopePartOfType()) {
       PrintStorageScope(*scope, ptr_os);
     }
-    PrintType(pointed_to, ptr_os);
+    PrintStorageType(pointed_to, ptr_os);
     ptr_os << "*)";
     return ptr_os.str();
   };
@@ -305,11 +346,7 @@ std::string CodeGenC::GetBufferRef(const PrimType& t, const VarNode* buffer, Pri
     os << "*("
        << "(" << ptr_cast(t) << vid << ")"
        << " + " << index_str << " / " << div_factor << ")";
-  } else if (t.MatchesCode(DLDataTypeCode::kDLFloat4_e2m1fn) && t.lanes() == 1) {
-    // float4_e2m1fn: sizeof(__nv_fp4_e2m1) = 1 byte, but data is packed
-    // 2 elements per byte.  Divide element index by 2 to get byte offset.
-    // This returns an lvalue so it works for address_of() and stores.
-    // Nibble extraction (for loads) is handled in Dispatch_(TensorLoadNode*).
+  } else if (t.MatchesCode(DLDataTypeCode::kDLFloat4_e2m1fn) && buffer_element_dtype.lanes() == 1) {
     os << "*(" << ptr_cast(t) << "(" << vid << " + " << index_str << " / 2))";
   } else if (t == buffer_element_dtype) {
     os << buffer_str << "[" << index_str << "]";
@@ -495,7 +532,9 @@ void CodeGenC::PrintStorageQualifier(const VarNode* var, std::ostream& os) {
 
 void CodeGenC::PrintStorageScope(const runtime::MemoryScope& scope,
                                  std::ostream& os) {  // NOLINT(*)
-  TVM_FFI_ICHECK(scope == runtime::MemoryScope::Global());
+  TVM_FFI_ICHECK(scope == runtime::MemoryScope::Global() || scope.name() == "local" ||
+                 scope.name() == "shared")
+      << "Unsupported C storage scope: " << scope.name();
 }
 
 inline void PrintConst(const IntImmNode* op, std::ostream& os, CodeGenC* p) {  // NOLINT(*)
@@ -540,11 +579,26 @@ inline void PrintConst(const IntImmNode* op, std::ostream& os, CodeGenC* p) {  /
 }
 
 inline void PrintConst(const FloatImmNode* op, std::ostream& os, CodeGenC* p) {  // NOLINT(*)
+  if (!std::isfinite(op->value)) {
+    std::ostringstream literal;
+    literal << '(';
+    p->PrintType(op->ty.as_or_throw<PrimType>(), literal);
+    literal << ')';
+    if (std::isinf(op->value)) {
+      literal << (std::signbit(op->value) ? "-INFINITY" : "INFINITY");
+    } else {
+      literal << "NAN";
+    }
+    p->MarkConst(literal.str());
+    os << literal.str();
+    return;
+  }
   switch (op->ty.as_or_throw<PrimType>().bits()) {
     case 64:
     case 32: {
       std::ostringstream temp;
-      temp << std::scientific << op->value;
+      temp << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10)
+           << op->value;
       if (op->ty.as_or_throw<PrimType>().bits() == 32) temp << 'f';
       p->MarkConst(temp.str());
       os << temp.str();
@@ -553,7 +607,8 @@ inline void PrintConst(const FloatImmNode* op, std::ostream& os, CodeGenC* p) { 
     case 16: {
       os << '(';
       p->PrintType(op->ty.as_or_throw<PrimType>(), os);
-      os << ')' << std::scientific << op->value << 'f';
+      os << ')' << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10)
+         << op->value << 'f';
       break;
     }
     default:
@@ -567,16 +622,23 @@ void CodeGenC::Dispatch_(const IntImmNode* op, std::ostream& os) {  // NOLINT(*)
 }
 
 void CodeGenC::Dispatch_(const FloatImmNode* op, std::ostream& os) {  // NOLINT(*)
+  TVM_FFI_CHECK(!IsCustomDType(op->ty.as_or_throw<PrimType>()), ValueError)
+      << "Custom dtype constants require a backend numeric lowering";
   PrintConst(op, os, this);
 }
 void CodeGenC::Dispatch_(const StringImmNode* op, std::ostream& os) {  // NOLINT(*)
-  os << "\"" << op->value << "\"";
+  PrintEscapedCString(op->value, os);
 }
 
 template <typename T>
 inline void PrintBinaryExpr(const T* op, const char* opstr,
                             std::ostream& os,  // NOLINT(*)
                             CodeGenC* p) {
+  for (PrimType operand_type : {op->a.ty(), op->b.ty()}) {
+    TVM_FFI_CHECK(!IsCustomDType(operand_type) || p->SupportsCustomDTypeArithmetic(operand_type),
+                  ValueError)
+        << "Custom dtype arithmetic requires a backend numeric lowering";
+  }
   PrimType op_ty = op->ty.template as_or_throw<PrimType>();
   if (op_ty.lanes() == 1) {
     if (isalpha(opstr[0])) {
@@ -598,6 +660,9 @@ inline void PrintBinaryExpr(const T* op, const char* opstr,
 }
 
 void CodeGenC::Dispatch_(const prim::CastNode* op, std::ostream& os) {  // NOLINT(*)
+  TVM_FFI_CHECK(!IsCustomDType(op->value.ty()) && !IsCustomDType(op->ty.as_or_throw<PrimType>()),
+                ValueError)
+      << "Custom dtype casts require a backend numeric lowering";
   std::stringstream value;
   this->PrintExpr(op->value, value);
   os << CastFromTo(value.str(), op->value.ty(), op->ty.as_or_throw<PrimType>());
@@ -846,7 +911,7 @@ void CodeGenC::Dispatch_(const CallNode* op, std::ostream& os) {  // NOLINT(*)
       const auto& pointer_type = op->ty.as_or_throw<PtrType>();
       os << "((";
       if (IsScopePartOfType()) PrintStorageScope(pointer_type->scope, os);
-      PrintType(pointer_type->element_type, os);
+      PrintStorageType(pointer_type->element_type, os);
       os << "*)(((";
       if (IsScopePartOfType()) PrintStorageScope(pointer_type->scope, os);
       os << "char*)";
@@ -868,7 +933,7 @@ void CodeGenC::Dispatch_(const CallNode* op, std::ostream& os) {  // NOLINT(*)
           PrintStorageScope(pointer_type->scope, os);
         }
         if (const auto* element_type = pointer_type->element_type.as<PrimTypeNode>()) {
-          this->PrintType(ffi::GetRef<PrimType>(element_type), os);
+          this->PrintStorageType(ffi::GetRef<PrimType>(element_type), os);
         } else {
           os << "void";
         }
@@ -894,12 +959,16 @@ void CodeGenC::Dispatch_(const CallNode* op, std::ostream& os) {  // NOLINT(*)
       TVM_FFI_ICHECK_EQ(target_dtype.lanes() * target_dtype.bits(),
                         source_dtype.lanes() * source_dtype.bits())
           << "reinterpret expects source and target to have the same number of bits";
-      int ssa_scope = BeginScope();
-      std::string rhs = SSAGetID(PrintExpr(op->args[0]), source_dtype);
+      std::string rhs = PrintExpr(op->args[0]);
+      if (!op->args[0].as<VarNode>()) {
+        std::string temporary = name_supply_->FreshName("reinterpret_value");
+        PrintIndent();
+        PrintSSAAssign(temporary, rhs, source_dtype);
+        rhs = temporary;
+      }
       os << "(*(";
       this->PrintType(target_dtype, os);
       os << " *)(&(" << rhs << ")))";
-      EndScope(ssa_scope);
     } else if (op->op.same_as(prim::isnan_op())) {
       os << "(";
       this->PrintExpr(op->args[0], os);
@@ -970,23 +1039,19 @@ void CodeGenC::DispatchDeclTensor(const BindNode* op, const CallNode* buffer_cal
     }
   }
 
+  PtrType pointer_type(PrimType(dtype), scope);
+  const auto* cast = data.as<CallNode>();
+  bool already_typed = cast && cast->op.same_as(tirx::reinterpret_op()) &&
+                       ffi::StructuralEqual()(cast->ty, pointer_type);
+  std::string value =
+      PrintExpr(already_typed ? data : Expr(Call(pointer_type, tirx::reinterpret_op(), {data})));
   alloc_storage_scope_[buffer.get()] = scope;
   this->PrintIndent();
   if (IsScopePartOfType()) {
     PrintStorageScope(scope, stream);
   }
-  PtrType pointer_type(PrimType(dtype), scope);
   PrintType(pointer_type, stream);
-  stream << ' ' << AllocVarID(buffer.get()) << " = ";
-  // Packed argument decoding may already have established this typed view.
-  const auto* cast = data.as<CallNode>();
-  if (cast && cast->op.same_as(tirx::reinterpret_op()) &&
-      ffi::StructuralEqual()(cast->ty, pointer_type)) {
-    PrintExpr(data, stream);
-  } else {
-    PrintExpr(Call(pointer_type, tirx::reinterpret_op(), {data}), stream);
-  }
-  stream << ";\n";
+  stream << ' ' << AllocVarID(buffer.get()) << " = " << value << ";\n";
   RegisterHandleType(buffer.get(), PrimType(dtype));
 }
 
@@ -1027,16 +1092,23 @@ void CodeGenC::Dispatch_(const TensorLoadNode* op, std::ostream& os) {  // NOLIN
       }
     }
 
-    if (value_ty.MatchesCode(DLDataTypeCode::kDLFloat4_e2m1fn) && lanes != 1) {
-      // A float4_e2m1fn element has 4 bits, which is an incomplete byte.
-      // So we cannot vector load it.
-      can_vector_load = false;
-    }
     if (can_vector_load) {
       std::string ref =
           GetVecLoad(op->ty.as_or_throw<PrimType>(),
                      op->source.as_or_throw<tvm::tirx::TensorVar>().get(), base.Eval());
       HandleVolatileLoads(ref, op, os);
+    } else if (value_ty.MatchesCode(kDLFloat4_e2m1fn)) {
+      std::string result = name_supply_->FreshName("packed_load");
+      PrintIndent();
+      PrintType(value_ty, stream);
+      stream << ' ' << result << "{};\n";
+      sym::Analyzer analyzer;
+      for (int lane = 0; lane < lanes; ++lane) {
+        PrimExpr scalar_index = analyzer->Simplify(prim::Shuffle({index}, {IntImm::Int32(lane)}));
+        std::string value = PrintExpr(TensorLoad(op->source, {scalar_index}));
+        PrintVecElemStore(result, value_ty, lane, value);
+      }
+      os << result;
     } else {
       std::ostringstream svalue_expr;
       std::string sindex = SSAGetID(PrintExpr(index), index.ty());
@@ -1080,14 +1152,39 @@ void CodeGenC::Dispatch_(const TensorStoreNode* op) {
     std::string ref =
         this->GetBufferRef(value_ty, op->dest.as_or_throw<TensorVar>().get(), index_expr);
     this->PrintIndent();
-    stream << ref << " = " << value << ";\n";
+    if (value_ty.MatchesCode(kDLFloat4_e2m1fn) && value_ty.lanes() == 1) {
+      std::string shift = "((" + PrintExpr(index_expr) + " % 2) * 4)";
+      stream << "(" << ref << ").__x = ((" << ref << ").__x & ~(15U << " << shift
+             << ")) | ((static_cast<__nv_fp4_e2m1>(" << value << ").__x & 15U) << " << shift
+             << ");\n";
+    } else {
+      stream << ref << " = " << value << ";\n";
+    }
   } else {
     tvm::PVar<PrimExpr> base;
 
-    if (tvm::ramp(base, 1, value_ty.lanes()).Match(index_expr) &&
-        value_ty.code() != DLDataTypeCode::kDLFloat4_e2m1fn) {
+    bool vector_store = tvm::ramp(base, 1, value_ty.lanes()).Match(index_expr);
+    if (vector_store && value_ty.MatchesCode(kDLFloat4_e2m1fn)) {
+      auto alignment = sym::Analyzer()->modular_set(base.Eval());
+      vector_store = alignment->coeff % 2 == 0 && alignment->base % 2 == 0;
+    }
+    if (vector_store) {
       std::string value = this->PrintExpr(op->value);
       this->PrintVecStore(op->dest.as_or_throw<TensorVar>().get(), value_ty, base.Eval(), value);
+    } else if (value_ty.MatchesCode(kDLFloat4_e2m1fn)) {
+      std::string value = SSAGetID(PrintExpr(op->value), value_ty);
+      sym::Analyzer analyzer;
+      for (int lane = 0; lane < value_ty.lanes(); ++lane) {
+        PrimExpr scalar_index =
+            analyzer->Simplify(prim::Shuffle({index_expr}, {IntImm::Int32(lane)}));
+        std::string ref = GetBufferRef(value_ty.WithLanes(1), buffer_var.get(), scalar_index);
+        std::string shift = "((" + PrintExpr(scalar_index) + " % 2) * 4)";
+        std::ostringstream element;
+        PrintVecElemLoad(value, value_ty, lane, element);
+        PrintIndent();
+        stream << "(" << ref << ").__x = ((" << ref << ").__x & ~(15U << " << shift << ")) | (("
+               << element.str() << ").__x << " << shift << ");\n";
+      }
     } else {
       // The assignment below introduces side-effect, and the resulting value cannot
       // be reused across multiple expression, thus a new scope is needed
@@ -1141,9 +1238,9 @@ void CodeGenC::Dispatch_(const prim::LetNode* op, std::ostream& os) {  // NOLINT
     PrintIndent();
     bool is_pointer = op->var->ty.as<PtrTypeNode>();
     if (is_pointer && handle_data_type_.count(op->var.get())) {
-      PrintType(handle_data_type_.at(op->var.get()), this->stream);
+      PrintStorageType(handle_data_type_.at(op->var.get()), this->stream);
       this->stream << "* " << AllocVarID(op->var.get()) << " = (";
-      PrintType(handle_data_type_.at(op->var.get()), this->stream);
+      PrintStorageType(handle_data_type_.at(op->var.get()), this->stream);
       this->stream << "*)" << value << ";\n";
     } else {
       PrintType(op->var->ty, this->stream);
@@ -1271,9 +1368,9 @@ void CodeGenC::Dispatch_(const BindNode* op) {
     PrintIndent();
     bool is_pointer = op->var->ty.as<PtrTypeNode>();
     if (is_pointer && handle_data_type_.count(op->var.get())) {
-      PrintType(handle_data_type_.at(op->var.get()), stream);
+      PrintStorageType(handle_data_type_.at(op->var.get()), stream);
       stream << "* " << AllocVarID(op->var.get()) << " = (";
-      PrintType(handle_data_type_.at(op->var.get()), stream);
+      PrintStorageType(handle_data_type_.at(op->var.get()), stream);
       stream << "*)" << value << ";\n";
     } else {
       PrintType(op->var->ty, this->stream);
@@ -1287,7 +1384,9 @@ void CodeGenC::DispatchAllocTensor(const BindNode* op, const CallNode* buffer_ca
   DLDataType dtype = buffer_call->ty_args[0].as_or_throw<tirx::TensorType>()->dtype->dtype;
   runtime::MemoryScope scope = buffer_call->ty_args[0].as_or_throw<tirx::TensorType>()->scope;
   TensorVar buffer = op->var.as_or_throw<TensorVar>();
-  DictAttrs annotations = buffer_call->attrs.as_or_throw<DictAttrs>();
+  DictAttrs annotations = buffer_call->attrs.has_value()
+                              ? buffer_call->attrs.value().as_or_throw<DictAttrs>()
+                              : DictAttrs(ffi::Map<ffi::String, ffi::Any>{});
   TVM_FFI_ICHECK(buffer.defined());
   std::string vid = AllocVarID(buffer.get(), buffer->name + "_ptr");
 
@@ -1303,7 +1402,7 @@ void CodeGenC::DispatchAllocTensor(const BindNode* op, const CallNode* buffer_ca
   alloc_storage_scope_[buffer.get()] = scope;
   PrintStorageScope(scope, stream);
 
-  PrintType(PrimType(dtype), stream);
+  PrintStorageType(PrimType(dtype), stream);
   stream << ' ' << vid << '[' << constant_size << "];\n";
 
   RegisterHandleType(buffer.get(), PrimType(dtype));
@@ -1313,7 +1412,15 @@ void CodeGenC::DispatchAllocTensor(const BindNode* op, const CallNode* buffer_ca
 }
 
 void CodeGenC::Dispatch_(const RegionStmtNode* op) {
-  if (op->op.same_as(tirx::launch_thread_op())) {
+  if (op->op.same_as(tirx::scope_op())) {
+    this->PrintIndent();
+    stream << "{\n";
+    int lexical_scope = BeginScope();
+    this->PrintStmt(op->body);
+    EndScope(lexical_scope);
+    this->PrintIndent();
+    stream << "}\n";
+  } else if (op->op.same_as(tirx::launch_thread_op())) {
     TVM_FFI_CHECK(std::string(op->args[0].as_or_throw<StringImm>()->value).rfind("vthread", 0) != 0,
                   ValueError)
         << "Virtual thread launches must be lowered before code generation";
@@ -1369,12 +1476,11 @@ void CodeGenC::PrintEscapedCString(const std::string& str, std::ostream& os) {
         os << "\\v";
         break;
       case '\0':
-        os << "\\0";
+        os << "\\000";
         break;
       default:
         if (c < 0x20 || c >= 0x7f) {
-          // Non-printable: emit as hex escape
-          os << "\\x" << std::setfill('0') << std::setw(2) << std::hex << static_cast<int>(c)
+          os << "\\" << std::setfill('0') << std::setw(3) << std::oct << static_cast<int>(c)
              << std::dec;
         } else {
           os << static_cast<char>(c);
@@ -1417,11 +1523,22 @@ void CodeGenC::Dispatch_(const ForNode* op) {
   std::string begin_str = PrintExpr(op->begin);
   std::string end_str = PrintExpr(op->end);
   std::string step_str = op->HasTrivialStep() ? "" : PrintExpr(op->step);
+  const auto* constant_step = op->step.as<IntImmNode>();
+  if (constant_step) {
+    TVM_FFI_CHECK(constant_step->value != 0, ValueError) << "For loop step must be nonzero";
+  }
   PrintIndent();
   std::string vid = AllocVarID(op->var.get());
   stream << "for (";
   PrintType(op->var.ty(), stream);
-  stream << ' ' << vid << " = " << begin_str << "; " << vid << " < " << end_str << "; ";
+  stream << ' ' << vid << " = " << begin_str << "; ";
+  if (constant_step) {
+    stream << vid << (constant_step->value < 0 ? " > " : " < ") << end_str;
+  } else {
+    stream << "((" << step_str << ") > 0 && " << vid << " < " << end_str << ") || ((" << step_str
+           << ") < 0 && " << vid << " > " << end_str << ")";
+  }
+  stream << "; ";
   if (step_str.empty()) {
     stream << "++" << vid;
   } else {
@@ -1451,10 +1568,14 @@ void CodeGenC::Dispatch_(const WhileNode* op) {
 }
 
 void CodeGenC::Dispatch_(const ReturnNode* op) {
+  if (const auto* unit = op->value.as<TupleNode>(); unit && unit->fields.empty()) {
+    PrintIndent();
+    stream << "return;\n";
+    return;
+  }
+  std::string value = PrintExpr(op->value);
   PrintIndent();
-  stream << "return ";
-  PrintExpr(op->value, stream);
-  stream << ";\n";
+  stream << "return " << value << ";\n";
 }
 
 void CodeGenC::Dispatch_(const BreakNode* op) {
@@ -1500,6 +1621,9 @@ void CodeGenC::Dispatch_(const EvaluateNode* op) {
   if (auto value = op->value.as<PrimExpr>(); value && IsConstInt(value.value())) return;
   const CallNode* call = op->value.as<CallNode>();
   if (call) {
+    if (call->op.same_as(prim::assume_op())) {
+      return;
+    }
     if (call->op.same_as(tirx::assume_aligned_op())) {
       // Alignment facts do not require a runtime statement on C-family targets.
       return;
@@ -1520,6 +1644,11 @@ void CodeGenC::Dispatch_(const EvaluateNode* op) {
       bool clears_union =
           store_ty.as<PtrTypeNode>() || (store_prim_type && store_prim_type.value().bits() < 64);
       if (kind == tirx::kTVMFFIAnyUnionValue && clears_union) {
+        std::string saved_value = name_supply_->FreshName("ffi_union_value");
+        this->PrintIndent();
+        this->PrintType(store_ty, this->stream);
+        this->stream << " " << saved_value << " = " << value << ";\n";
+        value = saved_value;
         this->PrintIndent();
         // when we set any union value, we need to be careful to
         // clear off the union value to zero if the set size is less than 64 bits

@@ -47,6 +47,7 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_d
   emit_asserts_ = emit_asserts;
   emit_fwd_func_decl_ = emit_fwd_func_decl;
   declared_globals_.clear();
+  vector_types_.clear();
   decl_stream << "// tvm target: " << target_str << "\n";
   decl_stream << "#include \"tvm/ffi/extra/c_env_api.h\"\n";
   decl_stream << "#include \"tvm/runtime/base.h\"\n";
@@ -55,12 +56,46 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_d
   decl_stream << "#define TVM_DLL TVM_FFI_DLL_EXPORT\n";
   decl_stream << "#include <math.h>\n";
   decl_stream << "#include <stdbool.h>\n";
+  decl_stream
+      << "#if defined(_MSC_VER)\n"
+      << "typedef __declspec(align(64)) struct { uint64_t data[16]; } TVMTensorMap;\n"
+      << "#else\n"
+      << "typedef struct { uint64_t data[16]; } __attribute__((aligned(64))) TVMTensorMap;\n"
+      << "#endif\n";
   CodeGenCHost::InitGlobalContext();
   CodeGenC::Init(output_ssa);
+  header_stream_ << decl_stream.str();
+  decl_stream.str("");
 }
 
 void CodeGenCHost::InitGlobalContext() {
   decl_stream << "void* " << ffi::symbol::tvm_ffi_library_ctx << " = NULL;\n";
+}
+
+void CodeGenCHost::Dispatch_(const ForNode* op) {
+  auto previous = parallel_chain_;
+  if (op->kind == ForKind::kParallel && !parallel_chain_.count(op)) {
+    int depth = 1;
+    const ForNode* current = op;
+    while (current->body->seq.size() == 1) {
+      auto child = current->body->seq[0].as<ForNode>();
+      if (!child || child->kind != ForKind::kParallel) break;
+      parallel_chain_.insert(child);
+      current = child;
+      ++depth;
+    }
+    PrintIndent();
+    stream << "#pragma omp parallel for";
+    if (depth > 1) stream << " collapse(" << depth << ")";
+    if (auto threads = op->annotations.Get("codegen.num_threads")) {
+      auto count = threads->cast<IntImm>();
+      TVM_FFI_CHECK(count->value > 0, ValueError) << "OpenMP thread count must be positive";
+      stream << " num_threads(" << count->value << ")";
+    }
+    stream << "\n";
+  }
+  CodeGenC::Dispatch_(op);
+  parallel_chain_ = std::move(previous);
 }
 
 void CodeGenCHost::DefineModuleName() { decl_stream << "void* " << module_name_ << " = NULL;\n"; }
@@ -97,7 +132,7 @@ void CodeGenCHost::AddFunction(const GlobalVar& gvar, const Function& func,
 void CodeGenCHost::GenerateForwardFunctionDeclarations(ffi::String global_symbol,
                                                        const ffi::Array<Type>& arg_types,
                                                        const Type& ret_type) {
-  if (!emit_fwd_func_decl_) {
+  if (!emit_fwd_func_decl_ || global_symbol == "TVMFFIEnvTensorAlloc") {
     return;
   }
   for (auto& func_already_defined : GetFunctionNames()) {
@@ -117,6 +152,19 @@ void CodeGenCHost::GenerateForwardFunctionDeclarations(ffi::String global_symbol
   fwd_decl_stream << ");\n";
 }
 
+void CodeGenCHost::PrintCallExtern(Type ret_type, ffi::String global_symbol,
+                                   const ffi::Array<Expr>& args, bool skip_first_arg,
+                                   std::ostream& os) {
+  if (global_symbol == "TVMFFIEnvTensorAlloc") {
+    size_t begin = static_cast<size_t>(skip_first_arg);
+    TVM_FFI_ICHECK_EQ(args.size(), begin + 2);
+    os << "TVMFFIEnvTensorAlloc((DLTensor*) " << PrintExpr(args[begin])
+       << ", (TVMFFIObjectHandle*) " << PrintExpr(args[begin + 1]) << ")";
+  } else {
+    CodeGenC::PrintCallExtern(ret_type, global_symbol, args, skip_first_arg, os);
+  }
+}
+
 void CodeGenCHost::PrintFuncPrefix(std::ostream& os) {  // NOLINT(*)
   os << "#ifdef __cplusplus\n"
      << "extern \"C\"\n"
@@ -124,8 +172,60 @@ void CodeGenCHost::PrintFuncPrefix(std::ostream& os) {  // NOLINT(*)
      << "TVM_DLL ";
 }
 
+void CodeGenCHost::PrintStorageType(const Type& type, std::ostream& os) {
+  if (auto pointer = type.as<PtrType>()) {
+    PrintStorageType(pointer.value()->element_type, os);
+    os << "*";
+    return;
+  }
+  if (type.as<tirx::TensorMapTypeNode>()) {
+    os << "TVMTensorMap";
+    return;
+  }
+  if (auto primitive = type.as<PrimType>();
+      primitive && primitive->IsScalar() && primitive->MatchesElementType(kDLBfloat, 16)) {
+    os << "uint16_t";
+  } else if (primitive && primitive->IsScalar() && primitive->bits() > 0 && primitive->bits() < 8 &&
+             primitive->MatchesCode(kDLInt, kDLUInt, kDLFloat4_e2m1fn)) {
+    os << "uint8_t";
+  } else {
+    PrintType(type, os);
+  }
+}
+
 void CodeGenCHost::PrintType(const PrimType& type, std::ostream& os) {  // NOLINT(*)
+  if (IsCustomDType(type)) {
+    PrintType(CustomDTypeStorage(type), os);
+    return;
+  }
   int lanes = type.lanes();
+  if (lanes > 1) {
+    TVM_FFI_CHECK(lanes <= 16 && (lanes & (lanes - 1)) == 0, ValueError)
+        << "C vectors require 2, 4, 8, or 16 lanes";
+    PrimType element = type.WithLanes(1);
+    if (element.MatchesCode(kDLBool)) element = PrimType::UInt(8);
+    std::ostringstream scalar;
+    PrintType(element, scalar);
+    std::string name = scalar.str() + std::to_string(lanes);
+    if (vector_types_.insert(name).second) {
+      header_stream_ << "typedef " << scalar.str() << " " << name << " __attribute__((vector_size("
+                     << element.StorageBytes() * lanes << "), aligned(" << element.StorageBytes()
+                     << "), may_alias));\n";
+      header_stream_ << "static inline " << name << " tvm_make_" << name << "(";
+      for (int index = 0; index < lanes; ++index) {
+        if (index) header_stream_ << ", ";
+        header_stream_ << scalar.str() << " value_" << index;
+      }
+      header_stream_ << ") { return (" << name << "){";
+      for (int index = 0; index < lanes; ++index) {
+        if (index) header_stream_ << ", ";
+        header_stream_ << "value_" << index;
+      }
+      header_stream_ << "}; }\n";
+    }
+    os << name;
+    return;
+  }
   if (type.MatchesCode(DLDataTypeCode::kDLOpaqueHandle) && !type.IsVoid()) {
     TVM_FFI_ICHECK_EQ(lanes, 1) << "does not support vector types";
     os << "void*";
@@ -143,7 +243,7 @@ void CodeGenCHost::PrintType(const PrimType& type, std::ostream& os) {  // NOLIN
   if (type.MatchesCode(DLDataTypeCode::kDLFloat)) {
     switch (type.bits()) {
       case 16:
-        os << "half";
+        os << "_Float16";
         break;
       case 32:
         os << "float";
@@ -193,17 +293,124 @@ void CodeGenCHost::PrintType(const PrimType& type, std::ostream& os) {  // NOLIN
   TVM_FFI_THROW(InternalError) << "Cannot convert type " << type->dtype << " to C type";
 }
 
-void CodeGenCHost::Dispatch_(const prim::BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
-  std::string v = PrintExpr(op->value);
-  int lanes = op->ty.as_or_throw<PrimType>().lanes();
-  os << "((";
-  PrintType(op->ty.as_or_throw<PrimType>(), os);
-  os << ")(";
-  for (int i = 0; i < lanes; ++i) {
-    if (i != 0) os << ", ";
-    os << v;
+std::string CodeGenCHost::CastFromTo(std::string value, const PrimType& from,
+                                     const PrimType& target) {
+  if (from == target || (from.IsScalar() && target.IsScalar())) {
+    return CodeGenC::CastFromTo(std::move(value), from, target);
   }
-  os << "))";
+  TVM_FFI_CHECK_EQ(from.lanes(), target.lanes(), ValueError)
+      << "C vector casts must preserve the number of lanes";
+  std::string source = SSAGetID(std::move(value), from);
+  std::ostringstream result;
+  PrintVecConstructor(target, result);
+  result << "(";
+  for (int index = 0; index < target.lanes(); ++index) {
+    if (index) result << ", ";
+    std::ostringstream element;
+    PrintVecElemLoad(source, from, index, element);
+    result << CodeGenC::CastFromTo(element.str(), from.WithLanes(1), target.WithLanes(1));
+  }
+  result << ")";
+  return result.str();
+}
+
+void CodeGenCHost::Dispatch_(const prim::BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
+  std::string value = SSAGetID(PrintExpr(op->value), op->value.ty());
+  int lanes = op->ty.as_or_throw<PrimType>().lanes();
+  PrintVecConstructor(op->ty.as_or_throw<PrimType>(), os);
+  os << "(";
+  for (int index = 0; index < lanes; ++index) {
+    if (index != 0) os << ", ";
+    os << value;
+  }
+  os << ")";
+}
+
+void CodeGenCHost::PrintVecConstructor(const PrimType& type, std::ostream& output) {
+  std::ostringstream name;
+  PrintType(type, name);
+  output << "tvm_make_" << name.str();
+}
+
+void CodeGenCHost::PrintVecBinaryOp(const std::string& operation, const PrimType& type,
+                                    PrimExpr lhs, PrimExpr rhs, std::ostream& output) {
+  if (!type.MatchesCode(kDLBool)) {
+    return CodeGenC::PrintVecBinaryOp(operation, type, lhs, rhs, output);
+  }
+  std::string left = SSAGetID(PrintExpr(lhs), lhs.ty());
+  std::string right = SSAGetID(PrintExpr(rhs), rhs.ty());
+  PrintVecConstructor(type, output);
+  output << "(";
+  for (int index = 0; index < type.lanes(); ++index) {
+    if (index) output << ", ";
+    output << "(" << left << "[" << index << "] " << operation << " " << right << "[" << index
+           << "])";
+  }
+  output << ")";
+}
+
+void CodeGenCHost::Dispatch_(const prim::NotNode* node, std::ostream& output) {
+  PrimType type = node->ty.as_or_throw<PrimType>();
+  if (type.IsScalar()) return CodeGenC::Dispatch_(node, output);
+  std::string value = SSAGetID(PrintExpr(node->a), node->a.ty());
+  PrintVecConstructor(type, output);
+  output << "(";
+  for (int index = 0; index < type.lanes(); ++index) {
+    if (index) output << ", ";
+    output << "(!" << value << "[" << index << "])";
+  }
+  output << ")";
+}
+
+void CodeGenCHost::Dispatch_(const prim::SelectNode* node, std::ostream& output) {
+  PrimType type = node->ty.as_or_throw<PrimType>();
+  if (type.IsScalar()) return CodeGenC::Dispatch_(node, output);
+  std::string condition = SSAGetID(PrintExpr(node->condition), node->condition.ty());
+  std::string true_value = SSAGetID(PrintExpr(node->true_value), node->true_value.ty());
+  std::string false_value = SSAGetID(PrintExpr(node->false_value), node->false_value.ty());
+  PrintVecConstructor(type, output);
+  output << "(";
+  for (int index = 0; index < type.lanes(); ++index) {
+    if (index) output << ", ";
+    output << "(" << condition;
+    if (!node->condition.ty().IsScalar()) output << "[" << index << "]";
+    output << " ? " << true_value << "[" << index << "] : " << false_value << "[" << index << "])";
+  }
+  output << ")";
+}
+
+void CodeGenCHost::PrintVecElemLoadExpr(const PrimType& type, int index, const std::string& value,
+                                        std::ostream& output) {
+  if (index == 0) {
+    PrintVecConstructor(type, output);
+    output << "(";
+  }
+  output << value;
+  output << (index + 1 == type.lanes() ? ")" : ", ");
+}
+
+void CodeGenCHost::PrintVecElemLoad(const std::string& value, const PrimType& type, int index,
+                                    std::ostream& output) {
+  output << "(" << value << ")[" << index << "]";
+}
+
+void CodeGenCHost::PrintVecElemStore(const std::string& value, const PrimType& type, int index,
+                                     const std::string& element) {
+  PrintIndent();
+  stream << "(" << value << ")[" << index << "] = " << element << ";\n";
+}
+
+void CodeGenCHost::Dispatch_(const prim::RampNode* node, std::ostream& output) {
+  std::string base = SSAGetID(PrintExpr(node->base), node->base.ty());
+  std::string stride = SSAGetID(PrintExpr(node->stride), node->stride.ty());
+  PrimType type = node->ty.as_or_throw<PrimType>();
+  PrintVecConstructor(type, output);
+  output << "(";
+  for (int index = 0; index < type.lanes(); ++index) {
+    if (index) output << ", ";
+    output << "(" << base << ") + (" << stride << ") * " << index;
+  }
+  output << ")";
 }
 
 void CodeGenCHost::PrintGetFuncFromBackend(const std::string& func_name,
@@ -211,13 +418,30 @@ void CodeGenCHost::PrintGetFuncFromBackend(const std::string& func_name,
   this->PrintIndent();
   this->stream << "if (" << packed_func_name << " == NULL) {\n";
   int packed_func_if_scope = this->BeginScope();
+  std::string global_name = name_supply_->FreshName("packed_global_name");
   this->PrintIndent();
-  this->stream << "if (TVMFFIEnvModLookupFromImports(" << module_name_ << ", \"" << func_name
-               << "\", &" << packed_func_name << ") != 0) {\n";
+  this->stream << "TVMFFIByteArray " << global_name << " = {\"" << func_name << "\", "
+               << func_name.size() << "};\n";
+  this->PrintIndent();
+  this->stream << "if ((" << module_name_ << " != NULL ? TVMFFIEnvModLookupFromImports("
+               << module_name_ << ", \"" << func_name << "\", &" << packed_func_name
+               << ") : TVMFFIFunctionGetGlobal(&" << global_name << ", &" << packed_func_name
+               << ")) != 0) {\n";
   int get_func_env_scope = this->BeginScope();
   this->PrintIndent();
   this->stream << "return -1;\n";
   this->EndScope(get_func_env_scope);
+  this->PrintIndent();
+  this->stream << "}\n";
+  this->PrintIndent();
+  this->stream << "if (" << packed_func_name << " == NULL) {\n";
+  int missing_func_scope = this->BeginScope();
+  this->PrintIndent();
+  this->stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", \"Global function not found: "
+               << func_name << "\");\n";
+  this->PrintIndent();
+  this->stream << "return -1;\n";
+  this->EndScope(missing_func_scope);
   this->PrintIndent();
   this->stream << "}\n";
   this->EndScope(packed_func_if_scope);
@@ -225,7 +449,7 @@ void CodeGenCHost::PrintGetFuncFromBackend(const std::string& func_name,
   this->stream << "}\n";
 }
 
-void CodeGenCHost::PrintCallPacked(const CallNode* op) {
+std::string CodeGenCHost::PrintCallPacked(const CallNode* op) {
   const StringImmNode* func_name = op->args[0].as<StringImmNode>();
   TVM_FFI_ICHECK(func_name != nullptr)
       << "call_[c]packed_lowered expects first argument as function name";
@@ -261,7 +485,7 @@ void CodeGenCHost::PrintCallPacked(const CallNode* op) {
   } else {
     this->stream << "if (" << packed_func_name << "(NULL, ";
   }
-  this->stream << "(TVMFFIAny*) " << args_stack << ", " << num_args << ", "
+  this->stream << "((TVMFFIAny*) " << args_stack << ") + " << begin << ", " << num_args << ", "
                << "&" << result << ") != 0) {\n";
   int func_call_scope = this->BeginScope();
   this->PrintIndent();
@@ -269,6 +493,7 @@ void CodeGenCHost::PrintCallPacked(const CallNode* op) {
   this->EndScope(func_call_scope);
   this->PrintIndent();
   this->stream << "}\n";
+  return result;
 }
 
 std::string CodeGenCHost::GetPackedName(const CallNode* op) {
@@ -289,6 +514,10 @@ std::string CodeGenCHost::GetPackedName(const CallNode* op) {
 }
 
 void CodeGenCHost::Dispatch_(const CallNode* op, std::ostream& os) {  // NOLINT(*)
+  if (op->op.same_as(prim::isnan_op()) && !op->ty.as_or_throw<PrimType>().IsScalar()) {
+    PrimExpr value = op->args[0].as_or_throw<PrimExpr>();
+    return PrintVecBinaryOp("!=", op->ty.as_or_throw<PrimType>(), value, value, os);
+  }
   if (op->op.same_as(tirx::stack_alloca_op())) {
     std::string stack_name = name_supply_->FreshName("stack");
     const std::string& type = op->args[0].as<StringImmNode>()->value;
@@ -296,6 +525,13 @@ void CodeGenCHost::Dispatch_(const CallNode* op, std::ostream& os) {  // NOLINT(
     TVM_FFI_ICHECK(num != nullptr);
     static_assert(alignof(TVMFFIAny) % alignof(DLTensor) == 0, "invariant");
     size_t count = num->value.as<size_t>().value();
+    if (type == "tensormap") {
+      TVM_FFI_CHECK_GT(count, 0U, ValueError) << "Tensor-map allocation count must be positive";
+      PrintIndent();
+      stream << "TVMTensorMap " << stack_name << "[" << count << "];\n";
+      os << stack_name;
+      return;
+    }
     size_t unit = sizeof(TVMFFIAny);
     size_t size = 0;
     if (type == "shape") {
@@ -312,10 +548,31 @@ void CodeGenCHost::Dispatch_(const CallNode* op, std::ostream& os) {  // NOLINT(
     os << "((";
     PrintType(op->ty, os);
     os << ")" << stack_name << ")";
-  } else if (op->op.same_as(tirx::call_packed_lowered_op())) {
-    this->PrintCallPacked(op);
-  } else if (op->op.same_as(tirx::call_cpacked_lowered_op())) {
-    this->PrintCallPacked(op);
+  } else if (op->op.same_as(tirx::call_packed_with_result_op())) {
+    TVM_FFI_ICHECK_EQ(op->args.size(), 4U);
+    std::string name = GetPackedName(op);
+    PrintGetFuncFromBackend(op->args[0].as<StringImmNode>()->value, name);
+    os << "TVMFFIFunctionCall(" << name << ", (TVMFFIAny*) " << PrintExpr(op->args[1]) << ", "
+       << PrintExpr(op->args[2]) << ", (TVMFFIAny*) " << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tirx::call_packed_lowered_op()) ||
+             op->op.same_as(tirx::call_cpacked_lowered_op())) {
+    std::string result = PrintCallPacked(op);
+    if (op->ty.as<PtrTypeNode>()) {
+      os << "((";
+      PrintType(op->ty, os);
+      os << ")" << result << ".v_ptr)";
+    } else {
+      PrimType type = op->ty.as_or_throw<PrimType>();
+      if (type.IsVoid()) {
+        os << "0";
+      } else {
+        TVM_FFI_CHECK(type.IsScalar(), TypeError) << "Packed calls return scalar values";
+        os << "((";
+        PrintType(type, os);
+        os << ")" << result
+           << (type.MatchesCode(DLDataTypeCode::kDLFloat) ? ".v_float64)" : ".v_int64)");
+      }
+    }
   } else if (op->op.same_as(tirx::throw_last_error_op())) {
     this->PrintIndent();
     this->stream << "return -1;\n";
@@ -368,6 +625,19 @@ inline void CodeGenCHost::PrintTernaryCondExpr(const T* op, const char* compare,
   Dispatch(op->b, temp_b);
   std::string b_id = SSAGetID(temp_b.str(), op->b.ty());
 
+  PrimType type = op->ty.template as_or_throw<PrimType>();
+  if (!type.IsScalar()) {
+    PrintVecConstructor(type, os);
+    os << "(";
+    for (int index = 0; index < type.lanes(); ++index) {
+      if (index) os << ", ";
+      os << "(" << a_id << "[" << index << "] " << compare << " " << b_id << "[" << index << "] ? "
+         << a_id << "[" << index << "] : " << b_id << "[" << index << "])";
+    }
+    os << ")";
+    return;
+  }
+
   os << "((" << a_id << ") " << compare << " (" << b_id << ") "
      << "? (" << a_id << ") : (" << b_id << "))";
 }
@@ -379,6 +649,7 @@ ffi::Module BuildCHost(IRModule mod, Target target) {
 
   CodeGenCHost cg;
   cg.Init(output_ssa, emit_asserts, emit_fwd_func_decl, target->str());
+  cg.ConfigureModule(mod);
   cg.SetConstantsByteAlignment(target->GetAttr<int64_t>("constants-byte-alignment").value_or(16));
 
   std::vector<std::pair<GlobalVar, Function>> funcs;
@@ -405,6 +676,9 @@ ffi::Module BuildCHost(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
+  if (auto postproc = mod->GetAttr(attr::kPostproc)) {
+    code = ffi::Function::GetGlobalRequired(*postproc)(code, target).cast<std::string>();
+  }
   return CSourceModuleCreate(code, "c", cg.GetFunctionNames());
 }
 

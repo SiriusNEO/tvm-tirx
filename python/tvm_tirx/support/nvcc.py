@@ -106,7 +106,14 @@ def _compile_cuda_nvcc(
     if isinstance(arch, list):
         cmd += arch
     elif isinstance(arch, str):
-        cmd += ["-arch", arch]
+        if arch.startswith("sm_") and arch.endswith(("a", "f")) and target_format == "fatbin":
+            virtual_arch = "compute_" + arch.removeprefix("sm_")
+            cmd += ["-gencode", f"arch={virtual_arch},code=[{arch},{virtual_arch}]"]
+        elif arch.startswith("sm_") and target_format == "ptx":
+            virtual_arch = "compute_" + arch.removeprefix("sm_")
+            cmd += ["-arch", virtual_arch, "-code", virtual_arch]
+        else:
+            cmd += ["-arch", arch]
 
     cmd += [
         "-U__CUDA_NO_HALF_OPERATORS__",

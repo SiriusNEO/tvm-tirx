@@ -62,6 +62,16 @@ def test_ptx_addr_registration_and_table_capabilities():
     assert sum(slot.space == "tmem" and not slot.allow_imm_offset for slot in addresses) == 104
 
 
+def test_shared_address_conversion_has_no_memory_effects():
+    from tvm_tirx.backend.cuda import op as cuda
+
+    pointer = tvm_tirx.ir.Var("pointer", tvm_tirx.ir.PtrType("uint64", "shared"))
+    converted = cuda.cvta_generic_to_shared(pointer)
+    assert converted.op.get_attr("TCallEffectKind") == CallEffectKind.Pure
+    assert converted.ty == tvm_tirx.ir.PrimType("uint32")
+    assert converted.args[0].same_as(pointer)
+
+
 def test_ptx_addr_table_validation_rejects_wrong_operand_classes():
     from tvm_tirx.backend.cuda.ptx.table import (
         InstructionEntry,

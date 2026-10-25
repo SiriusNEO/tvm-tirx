@@ -117,20 +117,19 @@ class NoOpRemover : public StmtExprMutatorWithAnalyzer {
     }
   }
   UnchangedOr<Stmt> Mutate_(const ForNode* op, InplaceMode inplace_mode) final {
-    auto extent_range =
-        sym::EvalSet(Range::GetExtentFromBeginEnd(op->begin, op->end), var_range_map_);
-    if (!prim::is_neg_inf(extent_range.max()) && !prim::is_pos_inf(extent_range.max()) &&
-        analyzer_->CanProve(extent_range.max() <= 0)) {
-      return Evaluate(0);
+    PrimExpr enters =
+        (op->step > 0 && op->begin < op->end) || (op->step < 0 && op->begin > op->end);
+    if (analyzer_->CanProve(!enters)) {
+      return MakeEvaluate({op->begin, op->end, op->step});
     }
-    var_range_map_.Set(op->var, sym::IntSet::FromRange(Range(op->begin, op->end)));
     Stmt stmt = Parent::Mutate_(op, inplace_mode).ValueOrUnchanged(ffi::GetRef<Stmt>(op));
-    var_range_map_.erase(op->var);
     op = stmt.as<ForNode>();
-    if (IsZero(Range::GetExtentFromBeginEnd(op->begin, op->end))) {
+    if (tirx::IsNoOp(op->body) && SideEffect(op->begin) == CallEffectKind::kPure &&
+        SideEffect(op->end) == CallEffectKind::kPure &&
+        SideEffect(op->step) == CallEffectKind::kPure) {
       return Evaluate(0);
     }
-    return tirx::IsNoOp(op->body) ? MakeEvaluate({op->begin, op->end, op->step}) : stmt;
+    return stmt;
   }
 
   UnchangedOr<Stmt> Mutate_(const EvaluateNode* op, InplaceMode inplace_mode) final {
@@ -167,11 +166,13 @@ class NoOpRemover : public StmtExprMutatorWithAnalyzer {
 
     // A write whose destination is known to already contain the
     // values to be written is a no-op.
-    PrimExpr stores_existing_value =
-        store->value - TensorLoad(store->dest.as_or_throw<TensorVar>(), store->indices) == 0;
-    stores_existing_value = analyzer_->Simplify(stores_existing_value);
-    if (IsOne(stores_existing_value)) {
-      return only_side_effects();
+    if (!IsCustomDType(store->value.ty())) {
+      PrimExpr stores_existing_value =
+          store->value - TensorLoad(store->dest.as_or_throw<TensorVar>(), store->indices) == 0;
+      stores_existing_value = analyzer_->Simplify(stores_existing_value);
+      if (IsOne(stores_existing_value)) {
+        return only_side_effects();
+      }
     }
 
     // If the stored value is a load from the same location, the

@@ -65,6 +65,9 @@ class ArgumentInfoObj : public ffi::Object {
 /*! \brief Managed reference to an argument descriptor. */
 class ArgumentInfo : public ffi::ObjectRef {
  public:
+  /*! \brief Construct a reflected argument descriptor in the compiler library. */
+  TVM_TIRX_DLL ArgumentInfo(ffi::String name, ffi::String doc = "");
+
   explicit ArgumentInfo(ffi::UnsafeInit tag, ffi::ObjectPtr<ArgumentInfoObj> n)
       : ffi::ObjectRef(tag) {
     data_ = std::move(n);
@@ -209,6 +212,8 @@ inline constexpr ffi::reflection::AttrKey<
  * When present, this concrete type takes precedence over FInferType.
  */
 inline constexpr ffi::reflection::AttrKey<Type> kFixedReturnType{"TFixedReturnType"};
+/*! \brief Opt into binding-aware traversal and rewriting of expressions in Call attributes. */
+inline constexpr ffi::reflection::AttrKey<bool> kAttrsMayContainExpr{"TAttrsMayContainExpr"};
 }  // namespace op_attr
 
 // Compatibility names; new callers can deduce the value type from the key.
@@ -282,12 +287,7 @@ struct arg : SignatureTrait {
   explicit arg(ffi::String name, ffi::String doc = "")
       : name(std::move(name)), doc(std::move(doc)) {}
 
-  void CollectMetadata(OpNode* op) const {
-    auto info = ffi::make_object<ArgumentInfoObj>();
-    info->name = name;
-    info->doc = doc;
-    op->args_info.push_back(ArgumentInfo(ffi::UnsafeInit{}, std::move(info)));
-  }
+  void CollectMetadata(OpNode* op) const { op->args_info.push_back(ArgumentInfo(name, doc)); }
 
   static bool Validate(ValidateState* state, ffi::Expected<void>* out) {
     if constexpr (!std::is_same_v<T, Expr>) {
@@ -317,12 +317,7 @@ struct var_args : SignatureTrait {
   explicit var_args(ffi::String name, ffi::String doc = "")
       : name(std::move(name)), doc(std::move(doc)) {}
 
-  void CollectMetadata(OpNode* op) const {
-    auto info = ffi::make_object<ArgumentInfoObj>();
-    info->name = name;
-    info->doc = doc;
-    op->var_args_info = ArgumentInfo(ffi::UnsafeInit{}, std::move(info));
-  }
+  void CollectMetadata(OpNode* op) const { op->var_args_info = ArgumentInfo(name, doc); }
 
   static bool Validate(ValidateState* state, ffi::Expected<void>* out) {
     if constexpr (!std::is_same_v<T, Expr>) {
@@ -356,12 +351,7 @@ struct ty_arg : SignatureTrait {
   explicit ty_arg(ffi::String name, ffi::String doc = "")
       : name(std::move(name)), doc(std::move(doc)) {}
 
-  void CollectMetadata(OpNode* op) const {
-    auto info = ffi::make_object<ArgumentInfoObj>();
-    info->name = name;
-    info->doc = doc;
-    op->ty_args_info.push_back(ArgumentInfo(ffi::UnsafeInit{}, std::move(info)));
-  }
+  void CollectMetadata(OpNode* op) const { op->ty_args_info.push_back(ArgumentInfo(name, doc)); }
 
   static bool Validate(ValidateState* state, ffi::Expected<void>* out) {
     if constexpr (!std::is_same_v<T, Type>) {
@@ -391,12 +381,7 @@ struct var_ty_args : SignatureTrait {
   explicit var_ty_args(ffi::String name, ffi::String doc = "")
       : name(std::move(name)), doc(std::move(doc)) {}
 
-  void CollectMetadata(OpNode* op) const {
-    auto info = ffi::make_object<ArgumentInfoObj>();
-    info->name = name;
-    info->doc = doc;
-    op->var_ty_args_info = ArgumentInfo(ffi::UnsafeInit{}, std::move(info));
-  }
+  void CollectMetadata(OpNode* op) const { op->var_ty_args_info = ArgumentInfo(name, doc); }
 
   static bool Validate(ValidateState* state, ffi::Expected<void>* out) {
     if constexpr (!std::is_same_v<T, Type>) {
@@ -757,6 +742,13 @@ OpAttrMap<ValueType> Op::GetAttrMap(const ffi::String& attr_name) {
 template <typename ValueType>
 OpAttrMap<ValueType> Op::GetAttrMap(ffi::reflection::AttrKey<ValueType> key) {
   return GetAttrMap<ValueType>(key.name);
+}
+
+/*! \brief Whether a Call's attributes participate in expression traversal and rewriting. */
+inline bool CallAttrsMayContainExpr(const CallNode* call) {
+  if (!call->attrs.has_value()) return false;
+  static const auto attributes = Op::GetAttrMap(op_attr::kAttrsMayContainExpr);
+  return attributes.get(call->op, false);
 }
 
 }  // namespace tvm

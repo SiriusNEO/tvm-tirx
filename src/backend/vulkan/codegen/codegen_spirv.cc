@@ -921,7 +921,9 @@ void CodeGenSPIRV::DispatchAllocTensor(const BindNode* op, const CallNode* buffe
   DLDataType dtype = buffer_call->ty_args[0].as_or_throw<tirx::TensorType>()->dtype->dtype;
   runtime::MemoryScope scope = buffer_call->ty_args[0].as_or_throw<tirx::TensorType>()->scope;
   TensorVar buffer = op->var.as_or_throw<TensorVar>();
-  DictAttrs annotations = buffer_call->attrs.value().as_or_throw<DictAttrs>();
+  DictAttrs annotations = buffer_call->attrs.has_value()
+                              ? buffer_call->attrs.value().as_or_throw<DictAttrs>()
+                              : DictAttrs(ffi::Map<ffi::String, ffi::Any>{});
   TVM_FFI_ICHECK(!PrimType(dtype).IsVoid());
   const IntImmNode* dim_imm = shape->fields[0].as<IntImmNode>();
   TVM_FFI_ICHECK(dim_imm) << "Can only handle constant size stack allocation in GPU";
@@ -1014,7 +1016,9 @@ void CodeGenSPIRV::DispatchDeclTensor(const BindNode* op, const CallNode* buffer
 }
 
 void CodeGenSPIRV::Dispatch_(const RegionStmtNode* op) {
-  if (op->op.same_as(tirx::launch_thread_op())) {
+  if (op->op.same_as(tirx::scope_op())) {
+    this->Dispatch(op->body);
+  } else if (op->op.same_as(tirx::launch_thread_op())) {
     TVM_FFI_CHECK(!op->args[0].as_or_throw<StringImm>()->value.starts_with("vthread"), ValueError)
         << "Virtual thread launches must be lowered before code generation";
     PrimVar var = op->body_params[0].as_or_throw<PrimVar>();
