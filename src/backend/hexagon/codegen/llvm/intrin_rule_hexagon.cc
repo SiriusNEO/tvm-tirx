@@ -83,11 +83,7 @@ inline PrimExpr DispatchTVMQHLWrapperFp16(const PrimExpr& e) {
       .as_or_throw<PrimExpr>();
 }
 
-void RegisterHexagonIntrinRules() {
-  static bool registered = false;
-  if (registered) return;
-  registered = true;
-
+TVM_FFI_STATIC_INIT_BLOCK() {
   // clang-format off
   OpDef("prim.fma")
       .set_attr<FLowerIntrinsic>("hexagon.FLowerIntrinsic",

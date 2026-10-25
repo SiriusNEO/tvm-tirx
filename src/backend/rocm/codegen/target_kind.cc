@@ -111,14 +111,6 @@ ffi::Map<ffi::String, ffi::Any> UpdateROCmAttrs(ffi::Map<ffi::String, ffi::Any> 
 }  // namespace rocm
 }  // namespace backend
 
-namespace codegen {
-#ifdef TVM_LLVM_VERSION
-void RegisterAMDGPUCodegen();
-namespace llvm {
-void RegisterROCMIntrinRules();
-}  // namespace llvm
-#endif
-}  // namespace codegen
 }  // namespace tvm
 
 TVM_FFI_STATIC_INIT_BLOCK() {
@@ -139,8 +131,4 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def_option<int64_t>("thread_warp_size", refl::DefaultValue(64))
       .set_default_keys({"rocm", "gpu"})
       .set_target_canonicalizer(UpdateROCmAttrs);
-#ifdef TVM_LLVM_VERSION
-  tvm::codegen::llvm::RegisterROCMIntrinRules();
-  tvm::codegen::RegisterAMDGPUCodegen();
-#endif
 }

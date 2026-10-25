@@ -20,21 +20,14 @@
 
 #include <string>
 
-#include "../../canonicalizer/arm_mprofile.h"
-#include "arm_aprofile.h"
-
 namespace tvm {
 namespace target {
 namespace canonicalizer {
 namespace llvm {
 
 ffi::Optional<ffi::String> DetectSystemTriple() {
-#ifdef TVM_LLVM_VERSION
   auto pf = tvm::ffi::Function::GetGlobal("codegen.llvm_get_system_triple");
-  TVM_FFI_ICHECK(pf.has_value()) << "The target llvm_get_system_triple was not found, "
-                                    "please compile with USE_LLVM = ON";
-  return (*pf)().cast<ffi::String>();
-#endif
+  if (pf) return (*pf)().cast<ffi::String>();
   return {};
 }
 
@@ -51,12 +44,14 @@ ffi::Map<ffi::String, ffi::Any> Canonicalize(ffi::Map<ffi::String, ffi::Any> tar
     target.Set("mtriple", system_triple);
   }
 
-  if (mprofile::IsArch(target)) {
-    return mprofile::Canonicalize(target);
+  std::string triple = target.Get("mtriple").value_or(ffi::String("")).as_or_throw<ffi::String>();
+  std::string arch = triple.substr(0, triple.find('-'));
+  auto canonicalize = ffi::Function::GetGlobal("codegen.llvm.canonicalize_target." + arch);
+  if (!canonicalize) {
+    canonicalize = ffi::Function::GetGlobal("codegen.llvm.canonicalize_target.default");
   }
-
-  if (aprofile::IsArch(target)) {
-    return aprofile::Canonicalize(target);
+  if (canonicalize) {
+    return (*canonicalize)(target).cast<ffi::Map<ffi::String, ffi::Any>>();
   }
 
   return target;

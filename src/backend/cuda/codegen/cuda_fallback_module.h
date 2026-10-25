@@ -24,7 +24,7 @@
  *   `CUDAModuleCreateWithFallback` is the ONLY entry point codegen uses to
  *   construct a CUDA `ffi::Module`.  It tries the runtime-registered factory
  *   "ffi.Module.create.cuda" via the FFI registry; on miss it constructs a
- *   `CUDAFallbackModuleObj` directly.  The fallback exists so that codegen
+ *   `CUDAFallbackModuleObj` through its fallback factory.  The fallback exists so that codegen
  *   can succeed on a build where the CUDA runtime is not linked.  This
  *   setup is helpful for cross compilation where we compile on one env
  *   and run on another.
@@ -46,7 +46,7 @@ namespace target {
 
 /*!
  * \brief Construct a `CUDAFallbackModuleObj` directly (no FFI registry
- *        round-trip).  Used by `CUDAModuleCreateWithFallback` and by tests
+ *        round-trip).  Registered as the fallback factory and used by tests
  *        that explicitly want a fallback instance.
  */
 ffi::Module CUDAFallbackModuleCreate(ffi::Bytes code, ffi::String fmt,
@@ -68,8 +68,8 @@ inline ffi::Module CUDAModuleCreateWithFallback(ffi::Bytes code, ffi::String fmt
                                                 ffi::Map<ffi::String, runtime::FunctionInfo> fmap,
                                                 ffi::Map<ffi::String, ffi::String> source) {
   if (tvm::support::GetEnv<bool>("TVM_TIRX_COMPILE_FORCE_FALLBACK", false)) {
-    return CUDAFallbackModuleCreate(std::move(code), std::move(fmt), std::move(fmap),
-                                    std::move(source));
+    return (*ffi::Function::GetGlobal("ffi.Module.create.cuda_fallback"))(code, fmt, fmap, source)
+        .cast<ffi::Module>();
   }
   // Registry: "ffi.Module.create.cuda" — real CUDA runtime factory.
   // Grep hint: grep -rn 'ffi.Module.create.cuda' src/
@@ -77,8 +77,8 @@ inline ffi::Module CUDAModuleCreateWithFallback(ffi::Bytes code, ffi::String fmt
   if (fcreate.has_value()) {
     return (*fcreate)(code, fmt, fmap, source).cast<ffi::Module>();
   }
-  return CUDAFallbackModuleCreate(std::move(code), std::move(fmt), std::move(fmap),
-                                  std::move(source));
+  return (*ffi::Function::GetGlobal("ffi.Module.create.cuda_fallback"))(code, fmt, fmap, source)
+      .cast<ffi::Module>();
 }
 
 }  // namespace target

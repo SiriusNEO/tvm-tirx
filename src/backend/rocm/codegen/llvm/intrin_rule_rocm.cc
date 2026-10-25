@@ -117,7 +117,7 @@ inline PrimExpr DispatchShuffle(const PrimExpr& e) {
 namespace llvm {
 using tirx::FLowerIntrinsic;
 
-void RegisterROCMIntrinRules() {
+TVM_FFI_STATIC_INIT_BLOCK() {
   // dummy because we don't have the activemask
   // clang-format off
   OpDef("tirx.gpu_warp_activemask")

@@ -21,12 +21,13 @@
  * \file hexagon_fallback_module.cc
  * \brief HexagonFallbackModuleObj — codegen-time placeholder used when the
  *        Hexagon runtime is not linked.  Preserves the serialized module
- *        format for external runtimes; never registers an FFI factory or loader.
+ *        format for external runtimes; registers its fallback factory, but no runtime loader.
  */
 #include "hexagon_fallback_module.h"
 
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/support/bytes_io.h>
 
 #include <string>
@@ -116,6 +117,11 @@ ffi::Module HexagonFallbackModuleCreate(ffi::Bytes code, ffi::String fmt,
   auto n = ffi::make_object<HexagonFallbackModuleObj>(std::move(code), std::move(fmt),
                                                       std::move(fmap), std::move(source));
   return ffi::Module(n);
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def("ffi.Module.create.hexagon_fallback",
+                                   HexagonFallbackModuleCreate);
 }
 
 }  // namespace target

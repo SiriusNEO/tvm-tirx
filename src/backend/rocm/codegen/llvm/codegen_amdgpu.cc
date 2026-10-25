@@ -341,11 +341,7 @@ ffi::Module BuildAMDGPU(IRModule mod, Target target) {
                                               ExtractFuncInfo(mod), std::move(source));
 }
 
-void RegisterAMDGPUCodegen() {
-  static bool registered = false;
-  if (registered) return;
-  registered = true;
-
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("target.build.rocm", BuildAMDGPU)

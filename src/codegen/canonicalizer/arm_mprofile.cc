@@ -24,6 +24,8 @@
 
 #include "arm_mprofile.h"
 
+#include <tvm/ffi/reflection/registry.h>
+
 #include <string>
 
 namespace tvm {
@@ -137,6 +139,14 @@ ffi::Map<ffi::String, ffi::Any> Canonicalize(ffi::Map<ffi::String, ffi::Any> tar
                                    .as_or_throw<ffi::Optional<ffi::Array<ffi::String>>>()));
 
   return target;
+}
+
+// CPU-only targets may omit mtriple, including existing Cortex-M configurations.
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def("codegen.llvm.canonicalize_target.default",
+                                   [](ffi::Map<ffi::String, ffi::Any> attrs) {
+                                     return IsArch(attrs) ? Canonicalize(attrs) : attrs;
+                                   });
 }
 
 }  // namespace mprofile

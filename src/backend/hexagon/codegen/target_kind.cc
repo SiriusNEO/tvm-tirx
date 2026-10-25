@@ -29,18 +29,6 @@
 
 #include "memory_scope.h"
 
-namespace tvm {
-
-#ifdef TVM_LLVM_VERSION
-namespace codegen {
-void RegisterHexagonCodegen();
-namespace llvm {
-void RegisterHexagonIntrinRules();
-}  // namespace llvm
-}  // namespace codegen
-#endif
-}  // namespace tvm
-
 TVM_FFI_STATIC_INIT_BLOCK() {
   tvm::backend::hexagon::RegisterMemoryScopes();
   using namespace tvm;
@@ -53,8 +41,4 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def_option<int64_t>("num-cores")
       .def_option<int64_t>("vtcm-capacity")
       .set_default_keys({"hexagon", "cpu"});
-#ifdef TVM_LLVM_VERSION
-  tvm::codegen::llvm::RegisterHexagonIntrinRules();
-  tvm::codegen::RegisterHexagonCodegen();
-#endif
 }

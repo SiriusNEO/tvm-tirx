@@ -588,11 +588,7 @@ ffi::Module BuildHexagon(IRModule mod, Target target) {
                                                  ExtractFuncInfo(mod), std::move(source));
 }
 
-void RegisterHexagonCodegen() {
-  static bool registered = false;
-  if (registered) return;
-  registered = true;
-
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("target.build.hexagon", BuildHexagon)

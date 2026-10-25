@@ -108,11 +108,17 @@ namespace {
 bool InitializeLLVM() {
   static std::atomic_flag initialized = ATOMIC_FLAG_INIT;
   if (!initialized.test_and_set()) {
+#if TVM_TIRX_LLVM_NATIVE_ONLY
+    TVM_FFI_ICHECK(!llvm::InitializeNativeTarget());
+    TVM_FFI_ICHECK(!llvm::InitializeNativeTargetAsmParser());
+    TVM_FFI_ICHECK(!llvm::InitializeNativeTargetAsmPrinter());
+#else
     llvm::InitializeAllTargetInfos();
     llvm::InitializeAllTargets();
     llvm::InitializeAllTargetMCs();
     llvm::InitializeAllAsmParsers();
     llvm::InitializeAllAsmPrinters();
+#endif
   }
   return true;
 }
@@ -393,7 +399,15 @@ static const llvm::Target* CreateLLVMTargetInstance(const std::string triple,
   const llvm::Target* llvm_instance = llvm::TargetRegistry::lookupTarget(triple, error);
 #endif
   if (!allow_missing && !llvm_instance) {
+#if TVM_TIRX_LLVM_NATIVE_ONLY
+    TVM_FFI_THROW(ValueError) << "LLVM target '" << triple
+                              << "' is unavailable in this native-only build. "
+                              << "You can try to install pip install "
+                                 "\"apache-tvm-tirx[all-targets]\" to gain more targets. "
+                              << "LLVM: " << error;
+#else
     TVM_FFI_ICHECK(llvm_instance) << "LLVM instance error: `" << error << "`";
+#endif
   }
 
   return llvm_instance;

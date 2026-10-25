@@ -17,8 +17,8 @@
 
 name: Build TIRx Wheel
 description: >
-  Build and test the standalone LLVM-enabled apache-tvm-tirx wheel for a given OS/architecture
-  combination using cibuildwheel.
+  Build and test matching native TIRx and optional LLVM targets wheels for one
+  OS/architecture using cibuildwheel.
 
 inputs:
   arch:
@@ -39,6 +39,18 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Set up release metadata Python
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      with:
+        python-version: "3.12"
+        activate-environment: true
+
+    - name: Prepare matching release metadata
+      shell: bash
+      run: |
+        uv pip install tomlkit setuptools-scm
+        python ci/wheel/prepare_release_metadata.py
+
     # The {project} placeholder is not expanded inside CIBW_ENVIRONMENT values, so
     # compute the forward-slash host path here (the Windows analog of the Linux
     # /project hardcode).
@@ -62,11 +74,11 @@ runs:
         # Keep per-platform feature settings and the CUDA runtime sidecar.
         CIBW_ENVIRONMENT_MACOS: >-
           MACOSX_DEPLOYMENT_TARGET="14.0"
-          CMAKE_ARGS="${{ inputs.cmake_defines }}"
+          CMAKE_ARGS="-DTVM_TIRX_LLVM_NATIVE_ONLY=ON ${{ inputs.cmake_defines }}"
         CIBW_ENVIRONMENT_LINUX: >-
-          CMAKE_ARGS="${{ inputs.cmake_defines }} -DTVM_TIRX_PACKAGE_EXTRA_LIBS=/project/build-wheel-cuda/lib/libtvm_runtime_cuda.so"
+          CMAKE_ARGS="-DTVM_TIRX_LLVM_NATIVE_ONLY=ON ${{ inputs.cmake_defines }} -DTVM_TIRX_PACKAGE_EXTRA_LIBS=/project/build-wheel-cuda/lib/libtvm_runtime_cuda.so"
         CIBW_ENVIRONMENT_WINDOWS: >-
-          CMAKE_ARGS="${{ inputs.cmake_defines }} -DTVM_TIRX_PACKAGE_EXTRA_LIBS=${{ env.TVM_CUDA_EXTRA_LIB }}"
+          CMAKE_ARGS="-DTVM_TIRX_LLVM_NATIVE_ONLY=ON ${{ inputs.cmake_defines }} -DTVM_TIRX_PACKAGE_EXTRA_LIBS=${{ env.TVM_CUDA_EXTRA_LIB }}"
         # Turns the wheel-specific assertions in
         # tests/python/runtime/test_validate_wheel_library.py
         # ON (they skip unless these are set). Every published wheel is LLVM-enabled,
@@ -75,3 +87,29 @@ runs:
         CIBW_TEST_ENVIRONMENT: >-
           TVM_WHEEL_EXPECT_LLVM="1"
           TVM_WHEEL_EXPECT_CUDA_RUNTIME="${{ inputs.include_cuda_runtime }}"
+
+    - name: Build and test LLVM targets wheel
+      uses: pypa/cibuildwheel@b3395e271a35f73dad77f21802abe9b986dfe299  # v4.3.1
+      with:
+        package-dir: ci/wheel/tvm-tirx-llvm-targets
+        config-file: pyproject.toml
+        output-dir: wheelhouse-llvm-targets
+      env:
+        CIBW_BUILD: ${{ inputs.build }}
+        CIBW_ARCHS_LINUX: ${{ inputs.arch }}
+        CIBW_ARCHS_MACOS: ${{ inputs.arch }}
+        CIBW_ARCHS_WINDOWS: ${{ inputs.arch }}
+        CIBW_ENVIRONMENT_MACOS: >-
+          MACOSX_DEPLOYMENT_TARGET="14.0"
+          CMAKE_ARGS="${{ inputs.cmake_defines }}"
+        CIBW_ENVIRONMENT_LINUX: >-
+          CMAKE_ARGS="${{ inputs.cmake_defines }}"
+        CIBW_ENVIRONMENT_WINDOWS: >-
+          CMAKE_ARGS="${{ inputs.cmake_defines }}"
+        # before-test runs before cibuildwheel installs the optional wheel, so
+        # its exact main dependency resolves to the wheel from this same build.
+        CIBW_BEFORE_TEST: >-
+          python "{project}/ci/wheel/check_llvm_targets_wheel.py" --install-core "{project}/wheelhouse"
+        CIBW_TEST_COMMAND: >-
+          python -I "{project}/ci/wheel/check_llvm_targets_wheel.py" --wheel "{wheel}" &&
+          python -I -m pytest -vvs "{project}/tests/python/codegen/llvm/test_basic.py::test_llvm_vadd_pipeline"

@@ -43,6 +43,7 @@ tvm_tirx_option(TVM_TIRX_USE_CUSTOM_LOGGING BOOL OFF "Use user-defined logging i
 # ######### LLVM ##########
 
 tvm_tirx_option(TVM_TIRX_USE_LLVM STRING ON "Build with LLVM (OFF, ON, or llvm-config command)")
+tvm_tirx_option(TVM_TIRX_LLVM_NATIVE_ONLY BOOL OFF "Link only the native LLVM target")
 
 # ######### Z3 ##########
 
@@ -157,8 +158,6 @@ file(GLOB CODEGEN_SRCS CONFIGURE_DEPENDS
   src/codegen/c/*.cc
   src/codegen/*.cc
   src/codegen/canonicalizer/*.cc
-  src/codegen/llvm/target_kind.cc
-  src/codegen/llvm/canonicalizer/*.cc
   src/backend/cuda/codegen/*.cc
   src/backend/cuda/op/*.cc
   src/backend/cuda/transform/*.cc
@@ -241,10 +240,6 @@ add_library(tvm_tirx_compiler::shared ALIAS tvm_tirx_compiler)
 target_link_libraries(tvm_tirx_compiler PUBLIC tvm_runtime tvm_tirx_header)
 target_link_libraries(tvm_tirx_compiler PRIVATE ${TVM_LINKER_LIBS})
 
-# Avoid GNU ld relaxation of LLVM's GOT calls into incorrect direct calls.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT "${TVM_TIRX_USE_LLVM}" MATCHES ${IS_FALSE_PATTERN})
-  target_link_options(tvm_tirx_compiler PRIVATE "-Wl,--no-relax" "-Wl,--as-needed")
-endif()
 include(cmake/modules/Logging.cmake)
 include(cmake/modules/Rust.cmake)
 
@@ -258,7 +253,7 @@ foreach(_target IN LISTS TVM_RUNTIME_BACKEND_LIBS)
   tvm_ffi_add_prefix_map(${_target}_objs "${CMAKE_CURRENT_SOURCE_DIR}")
   tvm_ffi_add_prefix_map(${_target} "${CMAKE_CURRENT_SOURCE_DIR}")
 endforeach()
-foreach(_target tvm_runtime tvm_tirx_compiler ${TVM_RUNTIME_BACKEND_LIBS})
+foreach(_target tvm_runtime tvm_tirx_compiler ${TVM_RUNTIME_BACKEND_LIBS} ${TVM_LLVM_BACKEND_LIB})
   if(TVM_TIRX_BUILD_PYTHON_MODULE)
     if(APPLE)
       set_property(TARGET ${_target} APPEND PROPERTY INSTALL_RPATH "@loader_path/../../tvm_ffi/lib")

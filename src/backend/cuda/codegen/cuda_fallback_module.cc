@@ -22,8 +22,8 @@
  * \brief CUDAFallbackModuleObj — codegen-time placeholder used when the CUDA
  *        runtime is not linked.  Mirrors `CUDAModuleObj`'s save/load format
  *        byte-for-byte, including the backend configuration string.
- *        Always compiled (independent of USE_CUDA); never registered as an
- *        FFI factory or loader.
+ *        Always compiled (independent of USE_CUDA); registered only under the
+ *        fallback factory name, with no runtime loader.
  */
 #include "cuda_fallback_module.h"
 
@@ -31,6 +31,7 @@
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/support/bytes_io.h>
 
 #include <string>
@@ -121,6 +122,10 @@ ffi::Module CUDAFallbackModuleCreate(ffi::Bytes code, ffi::String fmt,
   auto n = ffi::make_object<CUDAFallbackModuleObj>(std::move(code), std::move(fmt), std::move(fmap),
                                                    std::move(source));
   return ffi::Module(n);
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def("ffi.Module.create.cuda_fallback", CUDAFallbackModuleCreate);
 }
 
 }  // namespace target

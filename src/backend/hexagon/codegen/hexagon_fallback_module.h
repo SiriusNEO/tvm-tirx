@@ -24,7 +24,7 @@
  *   `HexagonModuleCreateWithFallback` is the ONLY entry point codegen uses
  *   to construct a Hexagon `ffi::Module`.  It tries the runtime-registered
  *   factory "ffi.Module.create.hexagon" via the FFI registry; on miss it
- *   constructs a `HexagonFallbackModuleObj` directly.  The fallback exists
+ *   constructs a `HexagonFallbackModuleObj` through its fallback factory.  The fallback exists
  *   so that codegen can succeed on a build where the Hexagon runtime is
  *   not linked.  This setup is helpful for cross compilation where we
  *   compile on one env and run on another.
@@ -50,7 +50,7 @@ using HexagonSourceMap = ffi::Map<ffi::String, ffi::Variant<ffi::String, ffi::By
 
 /*!
  * \brief Construct a `HexagonFallbackModuleObj` directly (no FFI registry
- *        round-trip).  Used by `HexagonModuleCreateWithFallback` and by
+ *        round-trip).  Registered as the fallback factory and used by
  *        tests that explicitly want a fallback instance.
  */
 ffi::Module HexagonFallbackModuleCreate(ffi::Bytes code, ffi::String fmt,
@@ -74,8 +74,9 @@ inline ffi::Module HexagonModuleCreateWithFallback(
     ffi::Bytes code, ffi::String fmt, ffi::Map<ffi::String, runtime::FunctionInfo> fmap,
     HexagonSourceMap source) {
   if (tvm::support::GetEnv<bool>("TVM_TIRX_COMPILE_FORCE_FALLBACK", false)) {
-    return HexagonFallbackModuleCreate(std::move(code), std::move(fmt), std::move(fmap),
-                                       std::move(source));
+    return (*ffi::Function::GetGlobal("ffi.Module.create.hexagon_fallback"))(code, fmt, fmap,
+                                                                             source)
+        .cast<ffi::Module>();
   }
   // Registry: "ffi.Module.create.hexagon" — real Hexagon runtime factory.
   // Grep hint: grep -rn 'ffi.Module.create.hexagon' src/
@@ -83,8 +84,8 @@ inline ffi::Module HexagonModuleCreateWithFallback(
   if (fcreate.has_value()) {
     return (*fcreate)(code, fmt, fmap, source).cast<ffi::Module>();
   }
-  return HexagonFallbackModuleCreate(std::move(code), std::move(fmt), std::move(fmap),
-                                     std::move(source));
+  return (*ffi::Function::GetGlobal("ffi.Module.create.hexagon_fallback"))(code, fmt, fmap, source)
+      .cast<ffi::Module>();
 }
 
 }  // namespace target

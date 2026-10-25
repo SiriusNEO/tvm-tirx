@@ -38,7 +38,7 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-  "apache-tvm-ffi>=0.1.15.post0",
+  "apache-tvm-ffi>=0.1.15.post1",
   "apache-tvm-ffi-orcjit>=0.1.2",
   "ml_dtypes",
   "numpy",
@@ -52,6 +52,8 @@ Repository = "https://github.com/apache/tvm"
 "Bug Tracker" = "https://github.com/apache/tvm/issues"
 
 [project.optional-dependencies]
+# The release preparation script pins the matching LLVM targets wheel.
+all-targets = []
 torch = ["torch"]
 cuda = ["cuda-bindings"]
 popen-pool = ["psutil", "cloudpickle"]
@@ -113,7 +115,7 @@ wheel.py-api = "py3"
 build-dir = "build"
 
 # Wheel configuration
-install.components = ["tvm_tirx"]
+install.components = ["tvm_tirx", "tvm_tirx_llvm_backend"]
 wheel.packages = ["python/tvm_tirx"]
 wheel.install-dir = "tvm_tirx"
 
@@ -147,6 +149,7 @@ logging.level = "INFO"
 [tool.scikit-build.cmake.define]
 TVM_TIRX_BUILD_PYTHON_MODULE = "ON"
 TVM_TIRX_BUILD_TESTS = "OFF"
+TVM_TIRX_LLVM_NATIVE_ONLY = "OFF"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -24,6 +24,7 @@
 
 #include "arm_aprofile.h"
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 
 #include <memory>
@@ -152,6 +153,33 @@ ffi::Map<ffi::String, ffi::Any> Canonicalize(ffi::Map<ffi::String, ffi::Any> tar
                                    .as_or_throw<ffi::Optional<ffi::Array<ffi::String>>>()));
 
   return target;
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  auto canonicalize = [](ffi::Map<ffi::String, ffi::Any> attrs) {
+    // Cortex-M handling remains in the core and does not require LLVM.
+    auto default_canonicalize =
+        ffi::Function::GetGlobal("codegen.llvm.canonicalize_target.default");
+    attrs = (*default_canonicalize)(attrs).cast<ffi::Map<ffi::String, ffi::Any>>();
+    return IsArch(attrs) ? Canonicalize(attrs) : attrs;
+  };
+  // Preserve the Arm architecture spellings accepted by the existing parser.
+  for (const char* arch :
+       {"aarch64",     "aarch64_be",  "aarch64_32", "arm",      "arm64",         "armeb",
+        "armv4",       "armv4t",      "armv5",      "armv5t",   "armv5te",       "armv5tej",
+        "armv6",       "armv6k",      "armv6t2",    "armv6kz",  "armv6m",        "armv7",
+        "armv7a",      "armv7l",      "armv7ve",    "armv7r",   "armv7m",        "armv7em",
+        "armv7s",      "armv7k",      "armv8",      "armv8a",   "armv8l",        "armv8r",
+        "armv8m.base", "armv8m.main", "armv8.1",    "armv8.1a", "armv8.1m.main", "armv8.2",
+        "armv8.2a",    "armv8.3",     "armv8.3a",   "armv8.4",  "armv8.4a",      "armv8.5",
+        "armv8.5a",    "armv8.6",     "armv8.6a",   "armv8.7",  "armv8.7a",      "armv8.8",
+        "armv8.8a",    "armv8.9",     "armv8.9a",   "armv9",    "armv9a",        "armv9.1",
+        "armv9.1a",    "armv9.2",     "armv9.2a",   "armv9.3",  "armv9.3a",      "armv9.4",
+        "armv9.4a",    "armv9.5",     "armv9.5a",   "armv9.6",  "armv9.6a",      "armv9.7",
+        "armv9.7a"}) {
+    std::string name = std::string("codegen.llvm.canonicalize_target.") + arch;
+    ffi::reflection::GlobalDef().def(name.c_str(), canonicalize);
+  }
 }
 
 }  // namespace aprofile

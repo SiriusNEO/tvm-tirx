@@ -22,13 +22,14 @@
  * \brief ROCmFallbackModuleObj — codegen-time placeholder used when the ROCm
  *        runtime is not linked.  Mirrors `ROCMModuleObj`'s save/load format
  *        byte-for-byte; see one-way comment in `SaveToBytes` below.
- *        Always compiled (independent of USE_ROCM); never registered as an
- *        FFI factory or loader.
+ *        Always compiled (independent of USE_ROCM); registered only under the
+ *        fallback factory name, with no runtime loader.
  */
 #include "rocm_fallback_module.h"
 
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/support/bytes_io.h>
 
 #include <string>
@@ -119,6 +120,10 @@ ffi::Module ROCmFallbackModuleCreate(ffi::Bytes code, ffi::String fmt,
   auto n = ffi::make_object<ROCmFallbackModuleObj>(std::move(code), std::move(fmt), std::move(fmap),
                                                    std::move(source));
   return ffi::Module(n);
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def("ffi.Module.create.rocm_fallback", ROCmFallbackModuleCreate);
 }
 
 }  // namespace target

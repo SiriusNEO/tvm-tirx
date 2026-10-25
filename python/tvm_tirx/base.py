@@ -18,6 +18,7 @@
 # pylint: disable=invalid-name, import-outside-toplevel
 """Base library for TVM."""
 
+import importlib.util
 import os
 from pathlib import Path
 
@@ -60,6 +61,54 @@ if not _RUNTIME_ONLY:
         _LOADED_LIBS["tvm_tirx_compiler"] = load_lib_ctypes(
             "tvm_tirx", "tvm_tirx_compiler", "RTLD_LOCAL", extra_lib_paths=_lib_paths
         )
+
+
+def _load_llvm_backend(lib_paths):
+    """Load one generic or native backend from the compiler installation."""
+    package = "tvm_tirx"
+    target_name = "tvm_tirx_llvm_backend"
+    try:
+        tvm_ffi_libinfo._find_library_by_basename(
+            package,
+            target_name,
+            lib_paths,
+            use_fallback_build_path=False,
+            use_env_path=False,
+        )
+    except RuntimeError:
+        # Only a native LLVM installation opts into the optional targets package.
+        # LLVM-OFF installations must not load it even when it is installed.
+        target_name = "tvm_tirx_llvm_backend_native"
+        try:
+            tvm_ffi_libinfo._find_library_by_basename(
+                package,
+                target_name,
+                lib_paths,
+                use_fallback_build_path=False,
+                use_env_path=False,
+            )
+        except RuntimeError:
+            return None
+        if importlib.util.find_spec("tvm_tirx_llvm_targets") is not None:
+            package = "apache-tvm-tirx-llvm-targets"
+            target_name = "tvm_tirx_llvm_backend"
+            tvm_ffi_libinfo._find_library_by_basename(
+                package,
+                target_name,
+                use_fallback_build_path=False,
+                use_env_path=False,
+            )
+    return tvm_ffi_libinfo.load_lib_ctypes(
+        package, target_name, "RTLD_LOCAL", extra_lib_paths=lib_paths
+    )
+
+
+if not _RUNTIME_ONLY:
+    _llvm_backend = _load_llvm_backend(
+        [Path(_LOADED_LIBS["tvm_tirx_compiler"]._name).resolve().parent]
+    )
+    if _llvm_backend is not None:
+        _LOADED_LIBS["tvm_tirx_llvm_backend"] = _llvm_backend
 
 if _RUNTIME_ONLY:
     from tvm_ffi import registry as _tvm_ffi_registry
